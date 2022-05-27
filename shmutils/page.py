@@ -322,7 +322,7 @@ def remove(name: Union[str, bytes]):
 __all__ = [
     "PageFlags",
     "SharedPage",
-    "shm_free",
+    "free",
     "shm_malloc",
     "truncate",
     "raw_shm_malloc",
