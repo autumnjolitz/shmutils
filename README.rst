@@ -26,16 +26,15 @@ Examples
 
 
     def read_and_count_to(
-        m: MemoryGroup, mutex: Lock, counter: cffiwrapper, limit: int
+        mutex: Lock, counter: cffiwrapper, limit: int
     ) -> Tuple[int, float]:
         t_s = time.time()
-        with m:
-            while True:
-                with mutex:
-                    value = counter[0]
-                    if value == limit:
-                        break
-                    counter[0] = value + 1
+        while True:
+            with mutex:
+                value = counter[0]
+                if value == limit:
+                    break
+                counter[0] = value + 1
         return value, time.time() - t_s
 
 
@@ -50,12 +49,13 @@ Examples
 
         with MemoryGroup("my-shared-heap", 4 * 1024 * 1024) as shared_memory:
             lock = Lock(shared_memory)
+            # wrap a CFFI integer so we can restore it across the process boundary
             counter = cffiwrapper(shared_memory.new("int32_t*"), shared_memory)
             with ProcessPoolExecutor(cores) as exe:
                 with lock:
                     for _ in range(cores):
                         futures.append(
-                            exe.submit(read_and_count_to, shared_memory, lock, counter, limit)
+                            exe.submit(read_and_count_to, lock, counter, limit)
                         )
                 # Let them go
                 t_s = time.time()
