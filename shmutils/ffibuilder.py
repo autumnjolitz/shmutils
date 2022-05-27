@@ -47,12 +47,6 @@ int pthread_mutex_destroy(pthread_mutex_t *mutex);
  int
  pthread_mutexattr_gettype(pthread_mutexattr_t *attr, int *type);
 
- int
- pthread_mutexattr_setpolicy_np(pthread_mutexattr_t *attr, int policy);
-
- int
- pthread_mutexattr_getpolicy_np(pthread_mutexattr_t *attr, int *policy);
-
 int pthread_mutex_init(pthread_mutex_t *restrict mutex, const pthread_mutexattr_t *restrict attr);
 int pthread_mutexattr_getpshared(const pthread_mutexattr_t *
        restrict attr, int *restrict pshared);
@@ -66,6 +60,7 @@ ffi.set_source(
     r"""
 #include <pthread.h>
 #include <sys/mman.h>
+#include <fcntl.h>
 
 typedef struct {
     char header[14];
@@ -80,6 +75,7 @@ int get_pthread_recursive_type(void) {
     return PTHREAD_MUTEX_RECURSIVE;
 };
     """,
+    libraries=["pthread"],
 )
 
 if __name__ == "__main__":
