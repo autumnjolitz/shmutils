@@ -270,7 +270,7 @@ class _SHMHandle(NamedTuple):
     name: bytes
 
 
-class SHMHandler(_SHMHandle):
+class SHMHandle(_SHMHandle):
     def __new__(cls, fd, name):
         if isinstance(name, str):
             name = name.encode()

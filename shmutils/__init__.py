@@ -2,9 +2,9 @@ from __future__ import annotations
 
 import os
 import errno
+from typing import Union
 
 from .page import SHMPage
-
 from _shmutils import lib, ffi
 
 
