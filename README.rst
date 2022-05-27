@@ -14,7 +14,8 @@ I've also wondered about how to pass shared memory definitions between processes
 Examples
 -----------
 
-::
+
+.. code-block:: python
 
     import os
     import time
