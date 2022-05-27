@@ -1,7 +1,8 @@
 import cffi
 
 ffi = cffi.FFI()
-ffi.cdef('''
+ffi.cdef(
+    """
 int
 shm_open(const char *name, int oflag, int mode);
 int
@@ -58,8 +59,11 @@ int pthread_mutexattr_getpshared(const pthread_mutexattr_t *
 int pthread_mutexattr_setpshared(pthread_mutexattr_t *attr,
        int pshared);
 int get_pthread_process_shared(void);
-''')
-ffi.set_source("_shmutils", r"""
+"""
+)
+ffi.set_source(
+    "_shmutils",
+    r"""
 #include <pthread.h>
 #include <sys/mman.h>
 
@@ -75,7 +79,8 @@ int get_pthread_process_shared(void){
 int get_pthread_recursive_type(void) {
     return PTHREAD_MUTEX_RECURSIVE;
 };
-    """)
+    """,
+)
 
 if __name__ == "__main__":
     ffi.compile(verbose=True)

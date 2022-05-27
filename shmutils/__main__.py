@@ -4,10 +4,7 @@ from shmutils import MemoryGroup, Lock, remove, cffiwrapper
 
 
 def read_and_count_to(
-    m: MemoryGroup,
-    mutex: Lock,
-    counter: cffiwrapper,
-    limit: int
+    m: MemoryGroup, mutex: Lock, counter: cffiwrapper, limit: int
 ) -> Tuple[int, float]:
     t_s = time.time()
     with m:
@@ -26,26 +23,28 @@ if __name__ == "__main__":
     from concurrent.futures import ProcessPoolExecutor, as_completed
 
     parser = argparse.ArgumentParser()
-    parser.add_argument('-c', '--cores', default=os.cpu_count(), type=int)
-    parser.add_argument('limit', default=2_500_000, nargs='?', type=int)
+    parser.add_argument("-c", "--cores", default=os.cpu_count(), type=int)
+    parser.add_argument("limit", default=2_500_000, nargs="?", type=int)
     args = parser.parse_args()
     limit = args.limit
     cores = args.cores
     assert limit > 0
     try:
-        remove('hello')
+        remove("hello")
     except FileNotFoundError:
         pass
     futures = []
 
-    with MemoryGroup('hello') as shared_memory:
+    with MemoryGroup("hello") as shared_memory:
         lock = Lock(shared_memory)
-        counter = cffiwrapper(shared_memory.new('int32_t*'), shared_memory)
-        print('starting workers')
+        counter = cffiwrapper(shared_memory.new("int32_t*"), shared_memory)
+        print("starting workers")
         with ProcessPoolExecutor(cores) as exe:
             with lock:
                 for _ in range(cores):
-                    futures.append(exe.submit(read_and_count_to, shared_memory, lock, counter, limit))
+                    futures.append(
+                        exe.submit(read_and_count_to, shared_memory, lock, counter, limit)
+                    )
             # Let them go
             t_s = time.time()
             process_results = [x.result() for x in as_completed(futures)]
@@ -53,5 +52,6 @@ if __name__ == "__main__":
         final_value = counter[0]
     print(f"Final value is {final_value}")
     print(f"Process results {process_results}")
-    print(f"Took {t_e:.2f}s for {cores} contending processes to count to {limit:,d} @ {limit / t_e:,.2f} sets/second")
-
+    print(
+        f"Took {t_e:.2f}s for {cores} contending processes to count to {limit:,d} @ {limit / t_e:,.2f} sets/second"
+    )
