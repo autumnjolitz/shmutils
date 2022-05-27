@@ -1,4 +1,5 @@
 import cffi
+import platform
 
 ffi = cffi.FFI()
 ffi.cdef(
@@ -55,6 +56,10 @@ int pthread_mutexattr_setpshared(pthread_mutexattr_t *attr,
 int get_pthread_process_shared(void);
 """
 )
+libraries = ["pthread"]
+if platform.system().lower() in ("linux",):
+    libraries.append("rt")
+
 ffi.set_source(
     "_shmutils",
     r"""
@@ -75,7 +80,7 @@ int get_pthread_recursive_type(void) {
     return PTHREAD_MUTEX_RECURSIVE;
 };
     """,
-    libraries=["pthread"],
+    libraries=libraries,
 )
 
 if __name__ == "__main__":
