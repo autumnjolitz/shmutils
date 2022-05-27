@@ -1,6 +1,8 @@
 import os
+import time
 from typing import Tuple
-from shmutils import MemoryGroup, Lock, remove, cffiwrapper
+from shmutils import MemoryGroup, Lock, remove
+from shmutils.utils import cffiwrapper
 
 
 def read_and_count_to(
@@ -19,7 +21,6 @@ def read_and_count_to(
 
 if __name__ == "__main__":
     import argparse
-    import time
     from concurrent.futures import ProcessPoolExecutor, as_completed
 
     parser = argparse.ArgumentParser()
@@ -35,7 +36,7 @@ if __name__ == "__main__":
         pass
     futures = []
 
-    with MemoryGroup("hello") as shared_memory:
+    with MemoryGroup("hello", 4 * 1024 * 1024) as shared_memory:
         lock = Lock(shared_memory)
         counter = cffiwrapper(shared_memory.new("int32_t*"), shared_memory)
         print("starting workers")

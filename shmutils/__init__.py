@@ -4,7 +4,7 @@ import os
 import errno
 from typing import Union
 
-from .page import SHMPage
+from .page import SharedPage, PageFlags as SharedPageFlags, shm_malloc, free, remove
 from _shmutils import lib, ffi
 
 
@@ -101,27 +101,26 @@ class MemoryGroup:
     """
 
     def __reduce__(self):
-        return MemoryGroup, (self.file,)
+        return MemoryGroup, (self.file, self.size)
 
     def new_mutex(self) -> SharedLock:
         return SharedLock(self)
 
-    def __init__(self, name: Union[SHMPage, str]):
+    def __init__(self, name: Union[SharedPage, str], size: int):
+        self._allocated_ptrs = {}
+        self.size = size
         file = None
         if isinstance(name, str):
             self.name = name
-        elif isinstance(name, SHMPage):
+        elif isinstance(name, SharedPage):
             file = name
             self.name = name = file.name
         if file is None:
-            try:
-                # original allocator gets to make the data structures
-                self.file = SHMPage(self.name, "x+")
-            except FileExistsError:
-                self.file = SHMPage(self.name, "r+")
-                self._load_malloc_map()
-            else:
+            self.file = file = shm_malloc(self.name, "x+", size)
+            if file.mode == "x+":
                 self._init_malloc_map()
+            else:
+                self._load_malloc_map()
         else:
             self.file = file
             self._load_malloc_map()
@@ -156,11 +155,11 @@ class MemoryGroup:
 
     @property
     def ptrs(self):
-        return self.file._allocated_ptrs
+        return self._allocated_ptrs
 
     @property
     def c_buf(self):
-        return self.file._cbuf
+        return self.file.c_buffer
 
     def _malloc(self, size: int):
         header_size = ffi.sizeof("shmmmap_header_t")
@@ -183,7 +182,7 @@ class MemoryGroup:
                         real_start = header_size + bytes_needed + span_start
                         real_end = real_start + size
                         ptr = ffi.addressof(self.c_buf[real_start:real_end])
-                        self.file._allocated_ptrs[ptr] = (
+                        self._allocated_ptrs[ptr] = (
                             (span_start, span_start + size),
                             (real_start, real_end),
                         )
@@ -206,9 +205,9 @@ class MemoryGroup:
         bytes_needed = self.file.size // 8
 
         try:
-            span, (index, endex) = self.file._allocated_ptrs.pop(ptr)
+            span, (index, endex) = self._allocated_ptrs.pop(ptr)
         except KeyError:
-            print(f"ptr {ptr} not in {self.file._allocated_ptrs}")
+            print(f"ptr {ptr} not in {self._allocated_ptrs}")
         else:
             print(f"freed {index}:{endex}")
             self.c_buf[index:endex] = b"\xee" * (endex - index)
@@ -244,3 +243,6 @@ class MemoryGroup:
         if self.file and not self.file.closed:
             self.file.close()
         self.file = None
+
+
+__all__ = ["SharedPage", "SharedPageFlags", "shm_malloc", "free", "remove"]

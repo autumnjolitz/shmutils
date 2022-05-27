@@ -3,14 +3,16 @@ from __future__ import annotations
 import os
 import errno
 import mmap
+import platform
 from enum import IntFlag
 from typing import NamedTuple, Union, Optional, NewType
 
 from _shmutils import lib, ffi
 from .exceptions import exception_from_shm_calls
+from .utils import RelativeView
 
 
-class SHMFlags(IntFlag):
+class PageFlags(IntFlag):
     READ_ONLY = os.O_RDONLY
     READ_WRITE = os.O_RDWR
     CREATE = os.O_CREAT
@@ -27,7 +29,7 @@ class SHMFlags(IntFlag):
         raise ValueError("READ_ONLY or READ_WRITE must be specified")
 
     @classmethod
-    def from_mode(cls, mode: str) -> SHMFlags:
+    def from_mode(cls, mode: str) -> PageFlags:
         if mode.endswith("b"):
             mode = mode[:-1]
         mode_special = ""
@@ -76,124 +78,42 @@ class SHMFlags(IntFlag):
 
 
 def reattach_shmpage(name, mode, size, skip_to, should_free):
-    page = SHMPage(name, "r+b", size, should_free)
+    page = SharedPage(name, "r+b", size, should_free)
     if skip_to:
         page.seek(skip_to)
     return page
 
 
-class RelativeView:
-    __slots__ = (
-        "_released",
-        "buffer",
-        "buffer_view",
-        "index",
-        "length",
-        "relative_view",
-    )
-
-    def __init__(
-        self,
-        buffer: Union[memoryview, bytes, bytearray, mmap.mmap, RelativeView],
-        index: int,
-        length: int,
-    ):
-        assert index > -1
-        assert length > 0
-        self._released = False
-        self.buffer = buffer
-        if isinstance(buffer, RelativeView):
-            self.buffer_view = buffer.relative_view
-        else:
-            self.buffer_view = memoryview(buffer)
-        self.index = index
-        self.relative_view = self.buffer_view[index : index + length]
-        self.length = len(self.relative_view)
-
-    def __len__(self):
-        return self.length
-
-    def absolute_view(self) -> memoryview:
-        return self.buffer_view
-
-    # ARJ: All sets/gets on it are done by relative
-    def __setitem__(
-        self,
-        slice_or_index: Union[slice, int],
-        value: Union[bytes, memoryview, bytearray, mmap.mmap],
-    ):
-        if isinstance(slice_or_index, slice):
-            start = slice_or_index.start or 0
-            end = slice_or_index.stop or (len(value) + start)
-            available_length = len(self.relative_view[start:])
-            write_length = end - start
-            print("write ", write_length, available_length)
-            if write_length > available_length:
-                raise IndexError(
-                    f"Attempted to write {write_length} but only {available_length} available"
-                )
-        return self.relative_view.__setitem__(slice_or_index, value)
-
-    def __getitem__(self, slice_or_index: Union[slice, int]) -> Union[int, memoryview]:
-        return self.relative_view.__getitem__(slice_or_index)
-
-    def __enter__(self) -> RelativeView:
-        if self._released:
-            raise ValueError
-        return self
-
-    def __exit__(self, exc_type, exc_value, traceback):
-        self.release()
-
-    def __del__(self):
-        if self._released is not None:
-            self.release()
-            self._released = None
-        self.index = None
-        self.length = None
-
-    def release(self, _skip_set=False):
-        if self.relative_view is not None:
-            self.relative_view.release()
-            self.relative_view = None
-        if self.buffer_view is not None:
-            self.buffer_view.release()
-            self.buffer_view = None
-        self.buffer = None
-
-
-class SHMPage:
-    MAX_SIZE_BYTES = 4 * 1024 * 1024
+class SharedPage:
+    MAX_SIZE_BYTES = 4 * 1024 * 1024 if platform.system() == "Darwin" else float("inf")
     MIN_SIZE_BYTES = 1
 
     def __init__(
         self,
         name: Union[str, bytes, int],
-        mode: Union[SHMFlags, str],
-        size: Optional[int] = None,
+        mode: Union[PageFlags, str],
+        size: int,
         should_free: bool = True,
         *,
-        fd=None,
+        fd: Optional[SharedMemoryHandle] = None,
     ):
-        if size is None:
-            size = self.MAX_SIZE_BYTES
         assert self.MIN_SIZE_BYTES <= size <= self.MAX_SIZE_BYTES
         if isinstance(mode, str):
-            self.flags = SHMFlags.from_mode(mode)
+            self.flags = PageFlags.from_mode(mode)
             self.mode = mode
-        elif isinstance(mode, (int, SHMFlags)):
+        elif isinstance(mode, (int, PageFlags)):
             if isinstance(mode, int):
-                mode = SHMFlags(mode)
+                mode = PageFlags(mode)
             self.flags = mode
             self.mode = mode.to_mode()
         else:
             raise TypeError(f"unknown type {type(mode)}")
         if fd is None:
-            fd = alloc(name, self.flags, 0o600)
+            fd = raw_shm_malloc(name, self.flags, 0o600)
 
         self._handle = fd
         if fd.size() != size:
-            os.ftruncate(fd.fileno(), size)
+            truncate(fd, size)
 
         self._mmap = mmap.mmap(fd.fileno(), size)
         self.closed = False
@@ -201,11 +121,11 @@ class SHMPage:
         self.size = size
         self._depth = 0
         self.c_buffer = ffi.from_buffer(
-            "char[]", self._mmap, require_writable=self.flags & SHMFlags.READ_WRITE
+            "char[]", self._mmap, require_writable=self.flags & PageFlags.READ_WRITE
         )
         self.should_free = should_free
 
-    def as_handle(self) -> SHMHandle:
+    def as_handle(self) -> SharedMemoryHandle:
         return self._handle
 
     def fileno(self) -> int:
@@ -262,20 +182,20 @@ class SHMPage:
         self.c_buffer = None
         self._mmap = None
         self._handle = None
-
-        if self.should_free:
-            free(self.name)
+        if self.should_free and self._handle is not None:
+            raw_free(self._fd)
+        self._fd = None
 
 
 DEFAULT_PERMISSIONS = 0o600
 
 
-class _SHMHandle(NamedTuple):
+class _SharedMemoryHandle(NamedTuple):
     fd: FileDescriptor
     name: bytes
 
 
-class SHMHandle(_SHMHandle):
+class SharedMemoryHandle(_SharedMemoryHandle):
     def __new__(cls, fd, name):
         if isinstance(name, str):
             name = name.encode()
@@ -323,11 +243,11 @@ class SHMHandle(_SHMHandle):
 FileDescriptor = NewType("FileDescriptor", int)
 
 
-def alloc(
+def raw_shm_malloc(
     name: Union[str, bytes],
-    flags: SHMFlags = SHMFlags.CREATE | SHMFlags.READ_WRITE,
+    flags: PageFlags = PageFlags.CREATE | PageFlags.READ_WRITE,
     permissions: int = DEFAULT_PERMISSIONS,
-) -> SHMHandle:
+) -> SharedMemoryHandle:
     if isinstance(name, str):
         name = name.encode()
     flags = flags.validate()
@@ -347,25 +267,68 @@ def alloc(
         elif err_name == "ENOENT":
             raise FileNotFoundError(f"[Errno {ffi.errno}] No such file or directory: {name!r}")
         raise ValueError("Unable to open shm file due to %s" % err_name)
-    return SHMHandle(FileDescriptor(fd), name)
+    return SharedMemoryHandle(FileDescriptor(fd), name)
 
 
-def free(fd: SHMHandle) -> int:
+def shm_malloc(name: Union[str, bytes], mode: Union[PageFlags, str], size: int) -> SharedPage:
+    flags = PageFlags.from_mode(mode)
+    should_free = flags & PageFlags.EXCLUSIVE_CREATION == PageFlags.EXCLUSIVE_CREATION
+    try:
+        fd = raw_shm_malloc(name, flags)
+    except FileExistsError:
+        flags ^= PageFlags.CREATE | PageFlags.EXCLUSIVE_CREATION
+        fd = raw_shm_malloc(name, PageFlags.READ_WRITE)
+    return SharedPage(name, flags, size, fd=fd, should_free=should_free)
+
+
+def free(page: Union[SharedPage, SharedMemoryHandle, str, bytes]):
+    if isinstance(page, (str, bytes)):
+        return remove(page)
+    if isinstance(page, SharedMemoryHandle):
+        return raw_free(page)
+    page.close()
+
+
+def truncate(fd: SharedMemoryHandle, size: int):
+    return os.ftruncate(fd.fileno(), size)
+
+
+def raw_free(fd: SharedMemoryHandle) -> int:
     """
     returns freed memory byte count.
     """
     assert fd.name, "fd must have a name"
     size = fd.stat().st_size
+    remove(fd.name)
+    return size
 
-    with ffi.new("char []", fd.name) as c_name:
+
+def remove(name: Union[str, bytes]):
+    """
+    Deletes the SHM handle name from the kernel.
+
+    When everyone is closed, it'll be collected.
+    """
+    if isinstance(name, str):
+        name = name.encode()
+    with ffi.new("char []", name) as c_name:
         errored = lib.shm_unlink(c_name)
     if not errored:
-        return size
+        return
     exc_type, err_code, err_name = exception_from_shm_calls(ffi.errno)
-    raise exc_type(err_code, err_name, fd.name)
+    raise exc_type(err_code, err_name, name)
 
 
-__all__ = ["SHMFlags", "SHMPage", "free"]
+__all__ = [
+    "PageFlags",
+    "SharedPage",
+    "shm_free",
+    "shm_malloc",
+    "truncate",
+    "raw_shm_malloc",
+    "raw_free",
+    "remove",
+]
 
 
 if __name__ == "__main__":

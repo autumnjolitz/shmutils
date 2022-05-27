@@ -1,6 +1,6 @@
 import pytest
 
-from shmutils.page import RelativeView
+from shmutils.utils import RelativeView
 
 
 def test_view():

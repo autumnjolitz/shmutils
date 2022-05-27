@@ -1,25 +1,26 @@
-from shmutils.page import SHMFlags
+from shmutils import SharedPageFlags
 
 
 def test_mode_to_flags():
-    assert SHMFlags.from_mode("r") == SHMFlags.READ_ONLY
-    assert SHMFlags.from_mode("r+") == SHMFlags.READ_WRITE
+    assert SharedPageFlags.from_mode("r") == SharedPageFlags.READ_ONLY
+    assert SharedPageFlags.from_mode("r+") == SharedPageFlags.READ_WRITE
     assert (
-        SHMFlags.from_mode("w") == SHMFlags.CREATE | SHMFlags.READ_WRITE | SHMFlags.TRUNCATE_ON_OPEN
+        SharedPageFlags.from_mode("w")
+        == SharedPageFlags.CREATE | SharedPageFlags.READ_WRITE | SharedPageFlags.TRUNCATE_ON_OPEN
     )
-    assert SHMFlags.from_mode("w+") == SHMFlags.CREATE | SHMFlags.READ_WRITE
+    assert SharedPageFlags.from_mode("w+") == SharedPageFlags.CREATE | SharedPageFlags.READ_WRITE
     assert (
-        SHMFlags.from_mode("x")
-        == SHMFlags.EXCLUSIVE_CREATION | SHMFlags.CREATE | SHMFlags.READ_WRITE
+        SharedPageFlags.from_mode("x")
+        == SharedPageFlags.EXCLUSIVE_CREATION | SharedPageFlags.CREATE | SharedPageFlags.READ_WRITE
     )
     assert (
-        SHMFlags.from_mode("x+")
-        == SHMFlags.EXCLUSIVE_CREATION | SHMFlags.CREATE | SHMFlags.READ_WRITE
+        SharedPageFlags.from_mode("x+")
+        == SharedPageFlags.EXCLUSIVE_CREATION | SharedPageFlags.CREATE | SharedPageFlags.READ_WRITE
     )
 
-    assert SHMFlags.from_mode("r").to_mode() == "r"
-    assert SHMFlags.from_mode("r+").to_mode() == "r+"
-    assert SHMFlags.from_mode("w").to_mode() == "w"
-    assert SHMFlags.from_mode("w+").to_mode() == "w+"
-    assert SHMFlags.from_mode("x").to_mode() == "x+"
-    assert SHMFlags.from_mode("x+").to_mode() == "x+"
+    assert SharedPageFlags.from_mode("r").to_mode() == "r"
+    assert SharedPageFlags.from_mode("r+").to_mode() == "r+"
+    assert SharedPageFlags.from_mode("w").to_mode() == "w"
+    assert SharedPageFlags.from_mode("w+").to_mode() == "w+"
+    assert SharedPageFlags.from_mode("x").to_mode() == "x+"
+    assert SharedPageFlags.from_mode("x+").to_mode() == "x+"
