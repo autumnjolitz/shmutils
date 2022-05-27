@@ -6,6 +6,7 @@
 dist/
 build/
 *.egg-info
+python/
 
 # Ignore OSX finder directories
 .DS_Store
