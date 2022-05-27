@@ -23,7 +23,14 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser()
     parser.add_argument("-c", "--cores", default=os.cpu_count(), type=int)
     parser.add_argument("limit", default=2_500_000, nargs="?", type=int)
+    parser.add_argument("-s", "--size", default=4, type=int)
+    parser.add_argument("-t", "--size-type", choices=["b", "k", "m", "g"], default="m")
     args = parser.parse_args()
+    size = args.size
+    for step in ("b", "k", "m", "g"):
+        if args.size_type == step:
+            break
+        size *= 1024
     limit = args.limit
     cores = args.cores
     assert limit > 0
@@ -33,7 +40,8 @@ if __name__ == "__main__":
         pass
     futures = []
 
-    with MemoryGroup("hello", 4 * 1024 * 1024) as shared_memory:
+    with MemoryGroup("hello", size) as shared_memory:
+        print(f"Size: {shared_memory.size / 1024 / 1024:,.2f} MiB")
         with shared_memory.heap() as buf:
             assert buf[0:10] == b"\x00" * 10
         lock = Lock(shared_memory)

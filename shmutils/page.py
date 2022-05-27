@@ -85,9 +85,6 @@ def reattach_shmpage(name, mode, size, skip_to, should_free):
 
 
 class SharedPage:
-    MAX_SIZE_BYTES = 4 * 1024 * 1024 if platform.system() == "Darwin" else float("inf")
-    MIN_SIZE_BYTES = 1
-
     def __init__(
         self,
         name: Union[str, bytes, int],
@@ -97,7 +94,6 @@ class SharedPage:
         *,
         fd: Optional[SharedMemoryHandle] = None,
     ):
-        assert self.MIN_SIZE_BYTES <= size <= self.MAX_SIZE_BYTES
         if isinstance(mode, str):
             self.flags = PageFlags.from_mode(mode)
             self.mode = mode
@@ -114,6 +110,10 @@ class SharedPage:
         self._handle = fd
         if fd.size() != size:
             truncate(fd, size)
+        new_size = os.fstat(fd.fileno()).st_size
+        if size != new_size:
+            print(f"asked fpr {size}, got {new_size}")
+            size = new_size
 
         self._mmap = mmap.mmap(fd.fileno(), size)
         self.closed = False
