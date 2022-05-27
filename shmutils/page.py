@@ -42,18 +42,23 @@ class SHMFlags(IntFlag):
             raise ValueError(
                 "Must have exactly one of create/read/write/append mode and at most one plus"
             )
-        if mode == "r":
-            flags = cls.READ_ONLY
-            if mode_special:
-                flags = cls.READ_WRITE
-        elif mode == "w":
-            flags = cls.CREATE | cls.READ_WRITE
-            if not mode_special:
-                flags |= cls.TRUNCATE_ON_OPEN
-        elif mode == "x":
-            flags = cls.CREATE | cls.EXCLUSIVE_CREATION | cls.READ_WRITE
-        elif mode == "a":
-            raise NotImplementedError("appending to shared memory not implemented")
+
+        MODES = {
+            "w": cls.CREATE | cls.READ_WRITE | cls.TRUNCATE_ON_OPEN,
+            "x": cls.CREATE | cls.EXCLUSIVE_CREATION | cls.READ_WRITE,
+            "a": None,
+            "r": cls.READ_ONLY,
+        }
+        flags = MODES[mode]
+        if flags is None:
+            # ARJ: to do an append requires a synchronized seek() offset.
+            raise NotImplementedError("appends not supported")
+        if mode_special:
+            if cls.READ_ONLY & flags == cls.READ_ONLY:
+                flags ^= cls.READ_ONLY
+            if cls.TRUNCATE_ON_OPEN & flags == cls.TRUNCATE_ON_OPEN:
+                flags ^= cls.TRUNCATE_ON_OPEN
+            flags |= cls.READ_WRITE
         return flags
 
     def to_mode(self) -> str:
@@ -65,7 +70,7 @@ class SHMFlags(IntFlag):
                 mode = "x"
         if self & self.TRUNCATE_ON_OPEN:
             mode = "w"
-        if self & self.READ_WRITE:
+        elif self & self.READ_WRITE:
             mode = f"{mode}+"
         return mode
 
