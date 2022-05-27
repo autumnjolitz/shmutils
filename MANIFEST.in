@@ -1,0 +1,18 @@
+# Manifests describe additions/removals of paths/files from
+# a project's autodiscovered files
+# the pound symbol (#) denotes a comment.
+
+# graft will add all files in a path to the project:
+# graft shmutils/some/directory
+# prune will remove like graft adds.
+
+# include will add just one filepath:
+# include README.md
+# exclude will remove one filepath
+# exclude test.py
+# recusive-include will add one level of files matching a glob
+# recusive-include shmutils/templates *.html
+
+include LICENSE
+
+
