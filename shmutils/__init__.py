@@ -5,6 +5,7 @@ import errno
 from typing import Union
 
 from .page import SharedPage, PageFlags as SharedPageFlags, shm_malloc, free, remove
+from .utils import RelativeView
 from _shmutils import lib, ffi
 
 
@@ -100,6 +101,12 @@ class MemoryGroup:
     other processes.
     """
 
+    def heap(self) -> RelativeView:
+        """
+        Return a view of the heap (after the headers)
+        """
+        return RelativeView(self.file._mmap, self._memory_start, self.size - self._memory_start)
+
     def __reduce__(self):
         return MemoryGroup, (self.file, self.size)
 
@@ -145,12 +152,14 @@ class MemoryGroup:
             with m[header_size : header_size + bytes_needed] as view:
                 view[0:bytes_needed] = b"\x00" * bytes_needed
         self.seek(header_size + bytes_needed)
+        self._memory_start = bytes_needed + header_size
 
     def _load_malloc_map(self):
         header_size = ffi.sizeof("shmmmap_header_t")
         header = ffi.cast("shmmmap_header_t*", self.c_buf[0:header_size])
         assert ffi.string(header.header) == b"shmutils_mmap"
         bytes_needed = self.file.size // 8
+        self._memory_start = bytes_needed + header_size
         self.file.seek(bytes_needed + header_size)
 
     @property

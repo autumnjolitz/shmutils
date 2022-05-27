@@ -37,7 +37,12 @@ if __name__ == "__main__":
     futures = []
 
     with MemoryGroup("hello", 4 * 1024 * 1024) as shared_memory:
+        with shared_memory.heap() as buf:
+            assert buf[0:10] == b"\x00" * 10
         lock = Lock(shared_memory)
+        # Okay, now what we made a mutex, our memory space should be used
+        with shared_memory.heap() as buf:
+            assert buf[0:10] != b"\x00" * 10
         counter = cffiwrapper(shared_memory.new("int32_t*"), shared_memory)
         print("starting workers")
         with ProcessPoolExecutor(cores) as exe:
