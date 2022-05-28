@@ -2,10 +2,11 @@ from __future__ import annotations
 
 import os
 import errno
+import resource
 import mmap
-import platform
+import math
 from enum import IntFlag
-from typing import NamedTuple, Union, Optional, NewType
+from typing import NamedTuple, Union, Optional, NewType, Type
 
 from _shmutils import lib, ffi
 from .exceptions import exception_from_shm_calls
@@ -84,6 +85,9 @@ def reattach_shmpage(name, mode, size, skip_to, should_free):
     return page
 
 
+MIN_SIZE = resource.getpagesize()
+
+
 class SharedPage:
     def __init__(
         self,
@@ -94,6 +98,13 @@ class SharedPage:
         *,
         fd: Optional[SharedMemoryHandle] = None,
     ):
+        if size < MIN_SIZE:
+            size = MIN_SIZE
+        pow_2_size = math.log(size, 2)
+        if pow_2_size > int(pow_2_size):
+            size = 2 ** (int(pow_2_size) + 1)
+        else:
+            size = 2 ** (int(pow_2_size))
         if isinstance(mode, str):
             self.flags = PageFlags.from_mode(mode)
             self.mode = mode
@@ -111,9 +122,7 @@ class SharedPage:
         if fd.size() != size:
             truncate(fd, size)
         new_size = os.fstat(fd.fileno()).st_size
-        if size != new_size:
-            print(f"asked fpr {size}, got {new_size}")
-            size = new_size
+        assert new_size == size
 
         self._mmap = mmap.mmap(fd.fileno(), size)
         self.closed = False
@@ -129,7 +138,7 @@ class SharedPage:
         return self._handle
 
     def fileno(self) -> int:
-        return self._mmap.fileno()
+        return int(self._handle)
 
     def __reduce__(self):
         return reattach_shmpage, (self.name, self.mode, self.size, self.tell(), False)
@@ -177,7 +186,7 @@ class SharedPage:
 
         ffi.release(self.c_buffer)
         self._mmap.close()
-        os.close(self._handle)
+        os.close(int(self._handle))
 
         self.c_buffer = None
         self._mmap = None
@@ -185,6 +194,19 @@ class SharedPage:
         if self.should_free and self._handle is not None:
             raw_free(self._fd)
         self._fd = None
+
+    @classmethod
+    def malloc(
+        cls: Type[SharedPage], name: Union[str, bytes], mode: Union[PageFlags, str], size: int
+    ) -> SharedPage:
+        flags = PageFlags.from_mode(mode)
+        should_free = flags & PageFlags.EXCLUSIVE_CREATION == PageFlags.EXCLUSIVE_CREATION
+        try:
+            fd = raw_shm_malloc(name, flags)
+        except FileExistsError:
+            flags ^= PageFlags.CREATE | PageFlags.EXCLUSIVE_CREATION
+            fd = raw_shm_malloc(name, PageFlags.READ_WRITE)
+        return cls(name, flags, size, fd=fd, should_free=should_free)
 
 
 DEFAULT_PERMISSIONS = 0o600
@@ -270,27 +292,21 @@ def raw_shm_malloc(
     return SharedMemoryHandle(FileDescriptor(fd), name)
 
 
-def shm_malloc(name: Union[str, bytes], mode: Union[PageFlags, str], size: int) -> SharedPage:
-    flags = PageFlags.from_mode(mode)
-    should_free = flags & PageFlags.EXCLUSIVE_CREATION == PageFlags.EXCLUSIVE_CREATION
-    try:
-        fd = raw_shm_malloc(name, flags)
-    except FileExistsError:
-        flags ^= PageFlags.CREATE | PageFlags.EXCLUSIVE_CREATION
-        fd = raw_shm_malloc(name, PageFlags.READ_WRITE)
-    return SharedPage(name, flags, size, fd=fd, should_free=should_free)
+shm_malloc = SharedPage.malloc
 
 
 def free(page: Union[SharedPage, SharedMemoryHandle, str, bytes]):
     if isinstance(page, (str, bytes)):
         return remove(page)
-    if isinstance(page, SharedMemoryHandle):
+    elif isinstance(page, SharedMemoryHandle):
         return raw_free(page)
     page.close()
 
 
-def truncate(fd: SharedMemoryHandle, size: int):
-    return os.ftruncate(fd.fileno(), size)
+def truncate(fd: Union[SharedMemoryHandle, int], size: int) -> int:
+    if isinstance(fd, SharedMemoryHandle):
+        fd = fd.fileno()
+    return os.ftruncate(fd, size)
 
 
 def raw_free(fd: SharedMemoryHandle) -> int:
@@ -329,9 +345,3 @@ __all__ = [
     "raw_free",
     "remove",
 ]
-
-
-if __name__ == "__main__":
-    import doctest
-
-    doctest.testmod(verbose=True)
