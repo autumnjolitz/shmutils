@@ -39,7 +39,7 @@ class RelativeView:
         "buffer_view",
         "index",
         "length",
-        "relative_view",
+        "_relative_view",
     )
 
     def __init__(
@@ -53,12 +53,15 @@ class RelativeView:
         self._released = False
         self.buffer = buffer
         if isinstance(buffer, RelativeView):
-            self.buffer_view = buffer.relative_view
-        else:
-            self.buffer_view = memoryview(buffer)
+            buffer = buffer._relative_view
+            assert isinstance(buffer, memoryview)
+        self.buffer_view = memoryview(buffer)
         self.index = index
-        self.relative_view = self.buffer_view[index : index + length]
-        self.length = len(self.relative_view)
+        self._relative_view = self.buffer_view[index : index + length]
+        self.length = len(self._relative_view)
+
+    def relative_view(self, index, length):
+        return type(self)(self, index, length)
 
     def __len__(self):
         return self.length
@@ -75,17 +78,17 @@ class RelativeView:
         if isinstance(slice_or_index, slice):
             start = slice_or_index.start or 0
             end = slice_or_index.stop or (len(value) + start)
-            available_length = len(self.relative_view[start:])
+            available_length = len(self._relative_view[start:])
             write_length = end - start
             print("write ", write_length, available_length)
             if write_length > available_length:
                 raise IndexError(
                     f"Attempted to write {write_length} but only {available_length} available"
                 )
-        return self.relative_view.__setitem__(slice_or_index, value)
+        return self._relative_view.__setitem__(slice_or_index, value)
 
     def __getitem__(self, slice_or_index: Union[slice, int]) -> Union[int, memoryview]:
-        return self.relative_view.__getitem__(slice_or_index)
+        return self._relative_view.__getitem__(slice_or_index)
 
     def __enter__(self) -> RelativeView:
         if self._released:
@@ -103,9 +106,9 @@ class RelativeView:
         self.length = None
 
     def release(self, _skip_set=False):
-        if self.relative_view is not None:
-            self.relative_view.release()
-            self.relative_view = None
+        if self._relative_view is not None:
+            self._relative_view.release()
+            self._relative_view = None
         if self.buffer_view is not None:
             self.buffer_view.release()
             self.buffer_view = None

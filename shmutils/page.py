@@ -186,7 +186,13 @@ class SharedPage:
 
         ffi.release(self.c_buffer)
         self._mmap.close()
-        os.close(int(self._handle))
+        try:
+            os.close(int(self._handle))
+        except OSError as e:
+            if e.errno == errno.EBADF:
+                pass
+            else:
+                raise
 
         self.c_buffer = None
         self._mmap = None
