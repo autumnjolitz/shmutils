@@ -4,7 +4,7 @@ import os
 import errno
 from typing import Union
 
-from .page import SharedPage, PageFlags as SharedPageFlags, shm_malloc, free, remove
+from .region import SharedRegion, RegionFlags as SharedRegionFlags, shm_open, shm_unlink, remove
 from .utils import RelativeView
 from _shmutils import lib, ffi
 
@@ -113,17 +113,17 @@ class MemoryGroup:
     def new_mutex(self) -> SharedLock:
         return SharedLock(self)
 
-    def __init__(self, name: Union[SharedPage, str], size: int):
+    def __init__(self, name: Union[SharedRegion, str], size: int):
         self._allocated_ptrs = {}
         self.size = size
         file = None
         if isinstance(name, str):
             self.name = name
-        elif isinstance(name, SharedPage):
+        elif isinstance(name, SharedRegion):
             file = name
             self.name = name = file.name
         if file is None:
-            self.file = file = shm_malloc(self.name, "x+", size)
+            self.file = file = shm_open(self.name, "x+", size)
             if file.mode == "x+":
                 self._init_malloc_map()
             else:
@@ -254,4 +254,4 @@ class MemoryGroup:
         self.file = None
 
 
-__all__ = ["SharedPage", "SharedPageFlags", "shm_malloc", "free", "remove"]
+__all__ = ["SharedRegion", "SharedRegionFlags", "shm_open", "shm_unlink", "remove"]

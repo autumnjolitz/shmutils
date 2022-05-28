@@ -13,7 +13,7 @@ from .exceptions import exception_from_shm_calls
 from .utils import RelativeView
 
 
-class PageFlags(IntFlag):
+class RegionFlags(IntFlag):
     READ_ONLY = os.O_RDONLY
     READ_WRITE = os.O_RDWR
     CREATE = os.O_CREAT
@@ -30,7 +30,7 @@ class PageFlags(IntFlag):
         raise ValueError("READ_ONLY or READ_WRITE must be specified")
 
     @classmethod
-    def from_mode(cls, mode: str) -> PageFlags:
+    def from_mode(cls, mode: str) -> RegionFlags:
         if mode.endswith("b"):
             mode = mode[:-1]
         mode_special = ""
@@ -79,7 +79,7 @@ class PageFlags(IntFlag):
 
 
 def reattach_shmpage(name, mode, size, skip_to, should_free):
-    page = SharedPage(name, "r+b", size, should_free)
+    page = SharedRegion(name, "r+b", size, should_free)
     if skip_to:
         page.seek(skip_to)
     return page
@@ -88,11 +88,11 @@ def reattach_shmpage(name, mode, size, skip_to, should_free):
 MIN_SIZE = resource.getpagesize()
 
 
-class SharedPage:
+class SharedRegion:
     def __init__(
         self,
         name: Union[str, bytes, int],
-        mode: Union[PageFlags, str],
+        mode: Union[RegionFlags, str],
         size: int,
         should_free: bool = True,
         *,
@@ -106,17 +106,17 @@ class SharedPage:
         else:
             size = 2 ** (int(pow_2_size))
         if isinstance(mode, str):
-            self.flags = PageFlags.from_mode(mode)
+            self.flags = RegionFlags.from_mode(mode)
             self.mode = mode
-        elif isinstance(mode, (int, PageFlags)):
+        elif isinstance(mode, (int, RegionFlags)):
             if isinstance(mode, int):
-                mode = PageFlags(mode)
+                mode = RegionFlags(mode)
             self.flags = mode
             self.mode = mode.to_mode()
         else:
             raise TypeError(f"unknown type {type(mode)}")
         if fd is None:
-            fd = raw_shm_malloc(name, self.flags, 0o600)
+            fd = raw_shm_open(name, self.flags, 0o600)
 
         self._handle = fd
         if fd.size() != size:
@@ -130,7 +130,7 @@ class SharedPage:
         self.size = size
         self._depth = 0
         self.c_buffer = ffi.from_buffer(
-            "char[]", self._mmap, require_writable=self.flags & PageFlags.READ_WRITE
+            "char[]", self._mmap, require_writable=self.flags & RegionFlags.READ_WRITE
         )
         self.should_free = should_free
 
@@ -198,20 +198,20 @@ class SharedPage:
         self._mmap = None
         self._handle = None
         if self.should_free and self._handle is not None:
-            raw_free(self._fd)
+            raw_shm_unlink(self._fd)
         self._fd = None
 
     @classmethod
-    def malloc(
-        cls: Type[SharedPage], name: Union[str, bytes], mode: Union[PageFlags, str], size: int
-    ) -> SharedPage:
-        flags = PageFlags.from_mode(mode)
-        should_free = flags & PageFlags.EXCLUSIVE_CREATION == PageFlags.EXCLUSIVE_CREATION
+    def shm_open(
+        cls: Type[SharedRegion], name: Union[str, bytes], mode: Union[RegionFlags, str], size: int
+    ) -> SharedRegion:
+        flags = RegionFlags.from_mode(mode)
+        should_free = flags & RegionFlags.EXCLUSIVE_CREATION == RegionFlags.EXCLUSIVE_CREATION
         try:
-            fd = raw_shm_malloc(name, flags)
+            fd = raw_shm_open(name, flags)
         except FileExistsError:
-            flags ^= PageFlags.CREATE | PageFlags.EXCLUSIVE_CREATION
-            fd = raw_shm_malloc(name, PageFlags.READ_WRITE)
+            flags ^= RegionFlags.CREATE | RegionFlags.EXCLUSIVE_CREATION
+            fd = raw_shm_open(name, RegionFlags.READ_WRITE)
         return cls(name, flags, size, fd=fd, should_free=should_free)
 
 
@@ -271,9 +271,9 @@ class SharedMemoryHandle(_SharedMemoryHandle):
 FileDescriptor = NewType("FileDescriptor", int)
 
 
-def raw_shm_malloc(
+def raw_shm_open(
     name: Union[str, bytes],
-    flags: PageFlags = PageFlags.CREATE | PageFlags.READ_WRITE,
+    flags: RegionFlags = RegionFlags.CREATE | RegionFlags.READ_WRITE,
     permissions: int = DEFAULT_PERMISSIONS,
 ) -> SharedMemoryHandle:
     if isinstance(name, str):
@@ -298,14 +298,14 @@ def raw_shm_malloc(
     return SharedMemoryHandle(FileDescriptor(fd), name)
 
 
-shm_malloc = SharedPage.malloc
+shm_open = SharedRegion.shm_open
 
 
-def free(page: Union[SharedPage, SharedMemoryHandle, str, bytes]):
+def shm_unlink(page: Union[SharedRegion, SharedMemoryHandle, str, bytes]):
     if isinstance(page, (str, bytes)):
         return remove(page)
     elif isinstance(page, SharedMemoryHandle):
-        return raw_free(page)
+        return raw_shm_unlink(page)
     page.close()
 
 
@@ -315,7 +315,7 @@ def truncate(fd: Union[SharedMemoryHandle, int], size: int) -> int:
     return os.ftruncate(fd, size)
 
 
-def raw_free(fd: SharedMemoryHandle) -> int:
+def raw_shm_unlink(fd: SharedMemoryHandle) -> int:
     """
     returns freed memory byte count.
     """
@@ -342,12 +342,12 @@ def remove(name: Union[str, bytes]):
 
 
 __all__ = [
-    "PageFlags",
-    "SharedPage",
-    "free",
-    "shm_malloc",
+    "RegionFlags",
+    "SharedRegion",
+    "shm_unlink",
+    "shm_open",
     "truncate",
-    "raw_shm_malloc",
-    "raw_free",
+    "raw_shm_open",
+    "raw_shm_unlink",
     "remove",
 ]

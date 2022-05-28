@@ -3,7 +3,7 @@ from contextlib import suppress
 
 import pytest
 
-from shmutils import shm_malloc, remove
+from shmutils import shm_open, remove
 from shmutils.utils import RelativeView
 
 
@@ -18,7 +18,7 @@ def test_malloc_sizes(size, expected_size):
     name = "test_malloc_sizes"
     with suppress(FileNotFoundError):
         remove(name)
-    with shm_malloc(name, "w+", size=size) as m:
+    with shm_open(name, "w+", size=size) as m:
         assert m.size == expected_size
         assert m.tell() == 0
 
