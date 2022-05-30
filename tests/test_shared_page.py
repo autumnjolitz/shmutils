@@ -3,7 +3,7 @@ from contextlib import suppress
 
 import pytest
 
-from shmutils import shm_open, remove
+from shmutils import shm_open, shm_unlink, PosixSharedMemory
 from shmutils.utils import RelativeView
 
 
@@ -17,8 +17,9 @@ page_size = resource.getpagesize()
 def test_malloc_sizes(size, expected_size):
     name = "test_malloc_sizes"
     with suppress(FileNotFoundError):
-        remove(name)
+        shm_unlink(name)
     with shm_open(name, "w+", size=size) as m:
+        assert isinstance(m, PosixSharedMemory)
         assert m.size == expected_size
         assert m.tell() == 0
 

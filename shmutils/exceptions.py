@@ -1,26 +1,20 @@
-import errno
-import functools
-from typing import Tuple, Type, Dict
-
-PAGE_MAPPINGS = {
-    errno.EACCES: PermissionError,
-    errno.ENOENT: FileNotFoundError,
-    errno.ENAMETOOLONG: ValueError,
-}
+import sys
+from typing import Type, Dict
 
 
-def exception_from(
-    code: int, mapping: Dict[int, Type[Exception]]
-) -> Tuple[Type[Exception], int, str]:
-    try:
-        err_name = errno.errorcode[code]
-    except KeyError:
-        err_name = "?????"
-    try:
-        exc_type = mapping[code]
-    except KeyError:
-        exc_type = OSError
-    return exc_type, code, err_name
+class DispatchError(ValueError):
+    pass
 
 
-exception_from_shm_calls = functools.partial(exception_from, mapping=PAGE_MAPPINGS)
+EXC_NAMES: Dict[str, Type[Exception]] = {}
+
+
+def _update():
+    here = sys.modules[__name__]
+    for key in dir(here):
+        value = getattr(here, key)
+        if isinstance(value, type) and issubclass(value, Exception):
+            EXC_NAMES[key] = value
+
+
+_update()

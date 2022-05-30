@@ -4,7 +4,8 @@ import os
 import errno
 from typing import Union
 
-from .region import SharedRegion, RegionFlags as SharedRegionFlags, shm_open, shm_unlink, remove
+from .posix import PosixSharedMemory, shm_open, shm_unlink
+from .mmap import MappedMemory
 from .utils import RelativeView
 from _shmutils import lib, ffi
 
@@ -113,13 +114,13 @@ class MemoryGroup:
     def new_mutex(self) -> SharedLock:
         return SharedLock(self)
 
-    def __init__(self, name: Union[SharedRegion, str], size: int):
+    def __init__(self, name: Union[PosixSharedMemory, str], size: int):
         self._allocated_ptrs = {}
         self.size = size
         file = None
         if isinstance(name, str):
             self.name = name
-        elif isinstance(name, SharedRegion):
+        elif isinstance(name, PosixSharedMemory):
             file = name
             self.name = name = file.name
         if file is None:
@@ -254,4 +255,9 @@ class MemoryGroup:
         self.file = None
 
 
-__all__ = ["SharedRegion", "SharedRegionFlags", "shm_open", "shm_unlink", "remove"]
+__all__ = [
+    "PosixSharedMemory",
+    "shm_open",
+    "shm_unlink",
+    "MappedMemory",
+]

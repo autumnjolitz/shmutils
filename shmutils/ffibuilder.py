@@ -4,10 +4,26 @@ import platform
 ffi = cffi.FFI()
 ffi.cdef(
     """
+typedef int... mode_t;
+
 int
-shm_open(const char *name, int oflag, int mode);
+shm_open(const char *name, int oflag, mode_t mode);
 int
 shm_unlink(const char *name);
+
+typedef int... off_t;
+
+void *mmap(
+     void *addr,
+     size_t len,
+     int prot,
+     int flags,
+     int fd,
+     off_t offset
+);
+int munmap(void *addr, size_t len);
+
+static const int MAP_FIXED;
 
 typedef struct { ...; } pthread_mutex_t;
 typedef struct { ...; } pthread_mutexattr_t;

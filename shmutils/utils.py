@@ -1,9 +1,83 @@
 from __future__ import annotations
 
+import functools
 import mmap
-from typing import Union
+import string
+from contextlib import suppress
+from typing import Union, Type, Any, Callable
 
 from _shmutils import ffi
+
+from .exceptions import DispatchError
+
+TYPE_NAME_OVERRIDES = {
+    type(None): "null-equivalent type",
+    complex: "complex number",
+    int: "integer",
+    float: "floating point number",
+}
+
+TestFunc = Callable[[Any, Type[Any]], bool]
+
+
+def conditional_dispatch(base_case_func):
+    @functools.wraps(base_case_func)
+    def wrapper(base_case_func: Callable) -> Callable:
+        def wrapped(*args, **kwargs):
+            for test_func, func in wrapped.__funcs__.items():
+                if test_func(*args, **kwargs):
+                    try:
+                        return func(*args, **kwargs)
+                    except DispatchError:
+                        continue
+            return base_case_func(*args, **kwargs)
+
+    wrapper.__funcs__ = {}
+
+    def register(test_func: TestFunc):
+        assert callable(test_func)
+
+        def register_wrapper(func):
+            wrapper.__funcs__[test_func] = func
+            return func
+
+        return register_wrapper
+
+    wrapper.register = register
+    return wrapper
+
+
+def is_cffi(value: Any) -> bool:
+    with suppress(AttributeError):
+        return value.__module__ == "_cffi_backend"
+    return False
+
+
+def contains(key, collection) -> bool:
+    return key in collection
+
+
+_uppercase_space = {ord(char): f" {char}" for char in string.ascii_uppercase}
+
+
+@conditional_dispatch
+def humanize_type(value: Type[Any]) -> str:
+    if not isinstance(value, type):
+        value = type(value)
+    value = value.__name__.translate(_uppercase_space)
+    return value.strip()
+
+
+@humanize_type.register(functools.partial(contains, collection=TYPE_NAME_OVERRIDES))
+def _(value):
+    return TYPE_NAME_OVERRIDES[value]
+
+
+@humanize_type.register(is_cffi)
+def _(value) -> str:
+    with suppress(TypeError):
+        return ffi.typeof(value).cname
+    raise DispatchError
 
 
 def reattach_cffi(c_name, memory, index, endex):
@@ -44,7 +118,7 @@ class RelativeView:
 
     def __init__(
         self,
-        buffer: Union[memoryview, bytes, bytearray, mmap.mmap, RelativeView],
+        buffer: Union[memoryview, bytearray, RelativeView],
         index: int,
         length: int,
     ):
@@ -67,7 +141,10 @@ class RelativeView:
         return self.length
 
     def absolute_view(self) -> memoryview:
-        return self.buffer_view
+        buffer = self.buffer
+        while isinstance(buffer, RelativeView):
+            buffer = buffer.buffer
+        return memoryview(buffer)
 
     # ARJ: All sets/gets on it are done by relative
     def __setitem__(
