@@ -2,7 +2,10 @@ import io
 import typing
 import errno
 import os
-from typing import Union, NewType, Type, NamedTuple, Dict, Optional
+import functools
+import logging
+import signal
+from typing import Union, NewType, Type, NamedTuple, Dict
 from enum import IntFlag
 from mmap import PROT_EXEC, PROT_READ, PROT_WRITE, PAGESIZE, MAP_SHARED, MAP_PRIVATE, MAP_ANONYMOUS
 
@@ -15,12 +18,45 @@ else:
         from typing_extensions import Literal
 
 from _shmutils import lib, ffi
-
+from intervaltree import IntervalTree, Interval
 from . import errors
+from .errors import libc_error
 
 from .shm import SharedMemoryHandle
 
+logger = logging.getLogger(__name__)
 Size = NewType("Size", int)
+
+is_forked = False
+
+
+@ffi.def_extern()
+def mmap_fork_callback():
+    global is_forked
+    is_forked = True
+
+
+code = lib.pthread_atfork(ffi.NULL, ffi.NULL, lib.mmap_fork_callback)
+if code:
+    raise libc_error(error_code=code)
+del code
+
+
+class NonEvictingIntervalTree(IntervalTree):
+    def add(self, interval):
+        if not self[interval.begin : interval.end]:
+            return super().add(interval)
+        raise ValueError("in use!")
+
+    def addi(self, begin, end, data):
+        if not self[begin:end]:
+            return super().addi(begin, end, data)
+        raise ValueError("in use!")
+
+    def __setitem__(self, index_or_slice, value):
+        if not self.__getitem__(index_or_slice):
+            return super().__setitem__(index_or_slice, value)
+        raise ValueError("in use!")
 
 
 class Protections(IntFlag):
@@ -54,10 +90,14 @@ MMAP_NEW_ERRCODES: Dict[int, Type[Exception]] = {
     errno.EACCES: PermissionError,
     errno.EBADF: (OSError, errors.MMAP_NEW_EBADF),
     errno.ENODEV: (OSError, errors.MMAP_NEW_ENODEV),
-    errno.ENOMEM: MemoryError,
+    errno.ENOMEM: OSError,
     errno.ENXIO: (OSError, errors.MMAP_NEW_ENXIO),
     errno.EOVERFLOW: (OSError, errors.MMAP_NEW_EOVERFLOW),
 }
+MUNMAP_CODES: Dict[int, Type[Exception]] = {errno.EINVAL: OSError}
+
+mmap_new_error = functools.partial(libc_error, codes=MMAP_NEW_ERRCODES)
+munmap_error = functools.partial(libc_error, codes=MUNMAP_CODES)
 
 
 def round_to_page_size(size: Size) -> Size:
@@ -95,19 +135,23 @@ class RawMMap(_RawMMap):
         fd: int = -1,
         offset: int = 0,
     ):
+        address_type = None
         if address is None:
-            address = ffi.NULL
-        elif isinstance(address, int):
-            address = ffi.cast("void *", address)
-        address_type = ffi.typeof(address)
+            address = 0
+        else:
+            if not isinstance(address, int):
+                address_type = ffi.typeof(address)
 
         assert isinstance(size, int) and size > 0
+        assert address > -1
         assert isinstance(protection, Protections)
         assert isinstance(flags, Flags)
         assert isinstance(fd, int) and fd >= -1
         assert isinstance(offset, int) and offset > -1
-        assert address_type.kind == "pointer"
-        assert address_type.item.kind == "void"
+        assert address_type is None or (address_type.kind, address_type.item.kind) == (
+            "pointer",
+            "void",
+        )
 
         if not (Flags.SHARED & flags == Flags.SHARED) and not (flags & Flags.PRIVATE):
             flags |= Flags.PRIVATE
@@ -122,77 +166,68 @@ class RawMMap(_RawMMap):
 
         if offset > 0:
             offset = round_to_page_size(offset)
-        ptr = lib.mmap(
-            ffi.cast("void *", address),
-            ffi.cast("size_t", size),
-            int(protection),
-            int(flags),
-            int(fd),
-            ffi.cast("off_t", offset),
-        )
-        if ptr == MMAP_FAILED:
-            if ffi.errno == errno.EINVAL:
-                template = "flags includes bits that are not part of any valid flags value."
-                if flags & Flags.FIXED == Flags.FIXED:
-                    template = errors.MMAP_NEW_EINVAL_FIXED
-            elif ffi.errno == errno.EACCES:
-                if protection & Protections.READ == Protections.READ:
-                    template = errors.MMAP_NEW_EACCESS_READ_ASKED
-                elif Protections & Protections.WRITE == Protections.WRITE:
-                    template = errors.MMAP_NEW_EACCESS_WRITE_SHARED_ASKED
-            elif ffi.errno == errno.ENOMEM:
-                if flags & Flags.FIXED == Flags.FIXED:
-                    template = errors.MMAP_NEW_ENOMEM_MAP_FIXED
-                elif flags & Flags.ANONYMOUS:
-                    template = errors.MMAP_NEW_ENOMEM_MAP_ANON
-            raise mmap_error(ffi.errno, template)
+        ptr = raw_mmap(address, size, protection, flags, fd, offset)
+        unaligned = int(ffi.cast("uintptr_t", ptr)) % PAGESIZE
+        assert not unaligned, "unalighned page!"
         return super().__new__(cls, ffi.buffer(ptr, size), ptr, size, protection, flags, fd, offset)
 
     def __reduce__(self):
-        return type(self), (
-            int(self),
-            len(self),
-            self.protection,
-            self.flags,
-            self.fd,
-            self.offset,
-        )
+        raise TypeError
 
-    def __int__(self) -> int:
-        start_address = ffi.cast("ssize_t", self.address)
-        return start_address
+    def as_absolute_offset(self) -> int:
+        return int(ffi.cast("uintptr_t", self.address))
+
+    def as_relative_offset(self, cdata) -> int:
+        void_ptr = ffi.cast("void*", cdata)
+        offset = int(void_ptr - self.address)
+        assert offset <= self.size
+        return offset
 
     def __len__(self) -> int:
         return self.size
 
 
-def mmap_error(error_code, template: Optional[str] = errors.GENERIC_C_ERROR, **kwargs):
-    try:
-        err_name: str = errno.errorcode[error_code]
-    except KeyError:
-        err_name = ""
-
-    try:
-        exc_type = MMAP_NEW_ERRCODES[error_code]
-        if isinstance(exc_type, tuple):
-            exc_type, template = exc_type
-    except KeyError:
-        exc_type = OSError
-    if err_name:
-        return errors.format_exception(exc_type, template, error_code, err_name, **kwargs)
-    return errors.format_exception(exc_type, template, error_code, **kwargs)
+def raw_mmap(
+    address: int,
+    size: int,
+    protection: Protections,
+    flags: Flags,
+    fd: Union[SharedMemoryHandle, int],
+    offset: int,
+) -> void_ptr:
+    ptr = lib.mmap(
+        ffi.cast("void *", address),
+        ffi.cast("size_t", size),
+        int(protection),
+        int(flags),
+        int(fd),
+        ffi.cast("off_t", offset),
+    )
+    if ptr == MMAP_FAILED:
+        template = None
+        if ffi.errno == errno.EINVAL:
+            template = "flags ({flags!r}) includes bits that are not part of any valid flags value."
+            if flags & Flags.FIXED == Flags.FIXED:
+                template = errors.MMAP_NEW_EINVAL_FIXED
+        elif ffi.errno == errno.EACCES:
+            if protection & Protections.READ == Protections.READ:
+                template = errors.MMAP_NEW_EACCESS_READ_ASKED
+            elif Protections & Protections.WRITE == Protections.WRITE:
+                template = errors.MMAP_NEW_EACCESS_WRITE_SHARED_ASKED
+        elif ffi.errno == errno.ENOMEM:
+            if flags & Flags.FIXED == Flags.FIXED:
+                template = errors.MMAP_NEW_ENOMEM_MAP_FIXED
+            elif flags & Flags.ANONYMOUS:
+                template = errors.MMAP_NEW_ENOMEM_MAP_ANON
+        raise libc_error(errors=MMAP_NEW_ERRCODES, flags=flags).with_template(template)
+    return ptr
 
 
 MMAP_FAILED = ffi.cast("void*", -1)
 
 
 class MappedMemory(io.RawIOBase):
-    __slots__ = (
-        "_raw",
-        "_closed",
-        "_view",
-        "_index",
-    )
+    __slots__ = ("_raw", "_closed", "_view", "_index", "_used", "_freelist", "_allocator")
 
     def __new__(
         cls,
@@ -225,26 +260,38 @@ class MappedMemory(io.RawIOBase):
         address: Union[int, void_ptr, None],
         size: Size,
         protection: Protections = Protections.READ_WRITE,
-        flags: Flags = Flags.NONE,
+        flags: Flags = Flags.PRIVATE | Flags.ANONYMOUS,
         fd: Union[int, SharedMemoryHandle] = -1,
         offset: int = 0,
     ):
+        assert isinstance(fd, (int, SharedMemoryHandle))
         self._closed = False
         self._fd = fd
         self._index = 0
         self._raw = RawMMap(address, size, protection, flags, int(fd), offset)
         self._view = memoryview(self._raw.buffer)
+        self._used = NonEvictingIntervalTree()
+        self._freelist = NonEvictingIntervalTree()
+        self.new = ffi.new_allocator(alloc=self.malloc, free=self.free)
 
     def __reduce__(self):
-        address = int(self._raw)
+        address = self._raw.as_absolute_offset()
         size = len(self._raw)
         protection = self._raw.protection
         flags = self._raw.flags
         offset = self._raw.offset
         index = self.tell()
-        if flags & Flags.ANONYMOUS:
-            raise TypeError("Anonymous Mappings may only be inherited through fork!")
-        return unpickle_mmap, (address, size, protection, flags, self._fd, offset, index)
+        return unpickle_mmap, (
+            address,
+            size,
+            protection,
+            flags,
+            self._fd,
+            offset,
+            index,
+            self._freelist,
+            self._used,
+        )
 
     def close(self):
         if self._closed:
@@ -256,7 +303,7 @@ class MappedMemory(io.RawIOBase):
             self._view = None
         if self._raw is not None:
             _, address, size, *_ = self._raw
-            unmap(address, size)
+            munmap(address, size)
             self._raw = None
         self._closed = True
 
@@ -265,9 +312,14 @@ class MappedMemory(io.RawIOBase):
             return len(self._raw)
         return -1
 
+    def get_cbuffer(self) -> buffer_t:
+        if self._raw is not None:
+            return self._raw.buffer
+        raise OSError(errno.EBADF, "operation on closed mmap")
+
     def getbuffer(self, start_index: int = 0, length: int = -1) -> memoryview:
         if (start_index, length) == (0, -1):
-            return self._view
+            return memoryview(self._view)
         if length == -1:
             length = len(self)
         if start_index + length > len(self):
@@ -280,7 +332,9 @@ class MappedMemory(io.RawIOBase):
             raise io.UnsupportedOperation
         return fd
 
-    def seek(self, offset: int, whence: Literal[os.SEEK_SET, os.SEEK_CUR, os.SEEK_END]):
+    def seek(
+        self, offset: int, whence: Literal[os.SEEK_SET, os.SEEK_CUR, os.SEEK_END] = os.SEEK_SET
+    ):
         if whence == os.SEEK_SET:
             assert offset >= 0
             new_index = offset
@@ -292,7 +346,7 @@ class MappedMemory(io.RawIOBase):
         else:
             raise io.UnsupportedOperation
         if new_index >= len(self):
-            new_index = len(self) - 1
+            new_index = len(self)
         elif new_index < 0:
             new_index = 0
         self._index = new_index
@@ -340,10 +394,141 @@ class MappedMemory(io.RawIOBase):
     def truncate(self, size) -> int:
         raise io.UnsupportedOperation
 
+    def _merge_intervals_near(self, span: Interval, tree: IntervalTree) -> Interval:
+        data = span.data
+        size = span.end - span.begin
+        assert not tree.at(span.begin)
+        assert not tree[span.begin : span.end]
+        while tree.at(span.begin + size):
+            (next_freed,) = tree.at(span.begin + size)
+            tree.remove(next_freed)
+            assert next_freed != span
+            span = Interval(span.begin, next_freed.end)
+        if span.begin > 0:
+            while tree.at(span.begin - 1):
+                (prev_freed,) = tree.at(span.begin - 1)
+                tree.remove(prev_freed)
+                span = Interval(prev_freed.begin, span.end)
+        assert not tree[span.begin : span.end]
+        return span._replace(data=data)
 
-def unpickle_mmap(address, size, protection, flags, fd, offset, seek_to) -> MappedMemory:
-    m = MappedMemory(address, size, protection, flags, fd, offset)
+    def _register_allocation(self, span: Interval, size: int):
+        """
+        mark a region as used in our feal for a size.
+        """
+        if not isinstance(span, Interval) and isinstance(span, tuple):
+            span = Interval(*span)
+        assert not self._used[span.begin : span.end], "double registration!"
+        unused_bytes_in_range = span.end - (span.begin + size)
+        assert unused_bytes_in_range > -1
+        if unused_bytes_in_range:
+            # release this range to the freelist again
+            self._freelist.add(
+                self._merge_intervals_near(
+                    Interval(span.begin + size, span.end, span.data), self._freelist
+                )
+            )
+        self._used[span.begin : span.begin + size] = (span.begin, size)
+        return span
+
+    def malloc(self, size: int) -> Union[void_ptr, Literal[ffi.NULL]]:
+        for candidate in self._freelist.items():
+            if candidate.begin + size <= candidate.end:
+                break
+        else:
+            # No freelist entries available. :(
+            # so let's just move our in used boundary forwards...
+            if self.remainder < size:
+                logger.error("out of space")
+                return ffi.NULL
+            obj_start = self.tell()
+            next_obj_start = self.seek(obj_start + size)
+            self[obj_start:next_obj_start] = b"\x00" * size
+            self._used[obj_start:next_obj_start] = (obj_start, size)
+            return ffi.cast("void*", self._raw.address + obj_start)
+        # Take out of circulation
+        self._freelist.remove(candidate)
+        self._register_allocation(candidate, size)
+        return ffi.cast("void*", self._raw.address + candidate.begin)
+
+    def free(self, ptr: void_ptr):
+        if self._raw is None:
+            return
+        offset = ptr - self._raw.address
+        try:
+            (interval,) = self._used.at(offset)
+        except ValueError:
+            logger.error(f"double free at address {ptr} ({offset:=})")
+            return
+        self._used.remove(interval)
+        size = interval.end - interval.begin
+
+        self[offset : offset + size] = b"\x00" * size
+        freed_interval = self._merge_intervals_near(
+            Interval(offset, offset + size, None), self._freelist
+        )
+        self._freelist.add(freed_interval)
+        if len(self._freelist) == 1:
+            (i,) = self._freelist.items()
+            if not self._used[i.end : len(self)]:
+                self[i.begin : i.end] = b"\x00" * (i.end - i.begin)
+                self.seek(i.begin)
+                self._freelist.remove(i)
+
+
+MPROTECT_ERRS = {
+    errno.EACCES: (
+        PermissionError,
+        "The requested protection conflicts with the access permissions of the process on the specified address range.",
+    ),
+    errno.EINVAL: (
+        ValueError,
+        "addr is not a multiple of the page size (i.e.  addr is not page-aligned).",
+    ),
+    errno.ENOMEM: (
+        OSError,
+        "The specified address range is outside of the address range of the process or includes an unmapped page.",
+    ),
+    errno.ENOTSUP: (
+        io.UnsupportedOperation,
+        "The combination of accesses requested in prot is not supported.",
+    ),
+}
+
+
+def mprotect(map: MappedMemory, offset: int, size: int, protection: Protections = Protections.NONE):
+    address = ffi.cast("void*", map._raw.address + offset)
+    if lib.mprotect(address, size, int(protection)):
+        raise errors.libc_error(codes=MPROTECT_ERRS)
+
+
+def unpickle_mmap(
+    desired_address: int,
+    size: int,
+    protection,
+    flags: Flags,
+    fd: int,
+    offset: int,
+    seek_to: int,
+    freelist: NonEvictingIntervalTree,
+    usedlist: NonEvictingIntervalTree,
+    pid: int,
+) -> MappedMemory:
+    assert os.fstat(fd).st_size > 0
+    if is_forked:
+        m = MappedMemory(desired_address, size, protection, flags | Flags.FIXED, fd, offset)
+    else:
+        m = MappedMemory(desired_address, size, protection, flags ^ Flags.FIXED, fd, offset)
+    if m._raw.as_absolute_offset() != desired_address:
+        direction = "lower"
+        if m._raw.as_absolute_offset() > desired_address:
+            direction = "higher"
+        raise ValueError(
+            f"0x{desired_address:02x} is marked as already used by this process, relocated to 0x{m._raw.as_absolute_offset():02x} ({direction}, {(m._raw.as_absolute_offset() - desired_address) // 1024 // 1024:,d} mb offset)"
+        )
     m.seek(seek_to)
+    m._freelist = freelist
+    m._used = usedlist
     return m
 
 
@@ -367,15 +552,23 @@ class SharedMemory(MappedMemory):
         """
         pickling a relative shared memory always becomes Absolute.
         """
-        address = int(self._raw)
+        address = self._raw.as_absolute_offset()
         size = len(self._raw)
+        protection = self._raw.protection
+        flags = self._raw.flags
+        offset = self._raw.offset
+        index = self.tell()
         return unpickle_mmap, (
             address,
             size,
-            self._raw.protection,
-            self.raw.flags | Flags.FIXED,
+            protection,
+            flags | Flags.FIXED,
             self._fd,
-            self._raw.offset,
+            offset,
+            index,
+            self._freelist,
+            self._used,
+            os.getpid(),
         )
 
 
@@ -413,8 +606,12 @@ class FixedPrivateMemory(PrivateMemory):
         super().__init__(address, size, protection, flags, fd, offset)
 
 
-def unmap(address: void_ptr, size: int):
+def munmap(address: void_ptr, size: int):
+    assert size > 0 and size == round_to_page_size(size)
+    raw_address = int(ffi.cast("uintptr_t", address))
+    _, remainder = divmod(raw_address, PAGESIZE)
+    assert not remainder
     result = lib.munmap(address, ffi.cast("size_t", size))
     if result == 0:
         return
-    raise mmap_error(ffi.errno)
+    raise munmap_error(template=errors.MUNMAP_EINVAL_MAP_STOMPED_BY_FIXED)

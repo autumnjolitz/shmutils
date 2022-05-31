@@ -101,6 +101,9 @@ class SharedMemoryHandle(_SharedMemoryHandle):
             name = name.encode()
         return super().__new__(cls, fd, name, flags)
 
+    def __reduce__(self):
+        return shm_open, (self.name, "r+")
+
     def truncate(self, size):
         os.ftruncate(int(self.fd), size)
         return self.size()
@@ -195,12 +198,8 @@ def shm_unlink(name: Union[str, bytes]) -> None:
         errored = lib.shm_unlink(c_name)
     if not errored:
         return
-    try:
-        exc_type = SHM_ERRCODES[ffi.errno]
-    except KeyError:
-        exc_type = OSError
-    raise errors.format_exception(
-        exc_type, errors.GENERIC_C_ERROR, ffi.errno, errno.errorcode.get(ffi.errno, "")
+    raise errors.libc_error(
+        codes=SHM_ERRCODES,
     )
 
 

@@ -4,6 +4,10 @@ import platform
 ffi = cffi.FFI()
 ffi.cdef(
     """
+
+
+extern "Python" void mmap_fork_callback(void);
+
 typedef int... mode_t;
 
 int
@@ -23,10 +27,27 @@ void *mmap(
 );
 int munmap(void *addr, size_t len);
 
+int mprotect(void *addr, size_t len, int prot);
+
+int pthread_atfork(void (*prepare)(void), void (*parent)(void), void (*child)(void));
+
 static const int MAP_FIXED;
 
+static const int PTHREAD_PROCESS_SHARED;
+static const int PTHREAD_PROCESS_PRIVATE;
+
+
+static const int PTHREAD_MUTEX_NORMAL;
+static const int PTHREAD_MUTEX_ERRORCHECK;
+static const int PTHREAD_MUTEX_RECURSIVE;
+static const int PTHREAD_MUTEX_DEFAULT;
+
+
+typedef struct { ...; } pthread_cond_t;
 typedef struct { ...; } pthread_mutex_t;
 typedef struct { ...; } pthread_mutexattr_t;
+typedef struct { ...; } pthread_condattr_t;
+struct timespec { ...; };
 
 typedef struct {
     char header[14];
@@ -34,42 +55,41 @@ typedef struct {
     uint32_t owner_pid;
 } shmmmap_header_t;
 
-int get_pthread_recursive_type(void);
 int pthread_mutex_lock(pthread_mutex_t *mutex);
 int pthread_mutex_trylock(pthread_mutex_t *mutex);
 int pthread_mutex_unlock(pthread_mutex_t *mutex);
 
+int pthread_condattr_init(pthread_condattr_t *attr);
+int pthread_condattr_destroy(pthread_condattr_t *attr);
+int pthread_condattr_setpshared(pthread_condattr_t *, int);
+
+int pthread_cond_init(pthread_cond_t *cond, const pthread_condattr_t *attr);
+int pthread_cond_timedwait(pthread_cond_t *cond, pthread_mutex_t *mutex, const struct timespec *abstime);
+int pthread_cond_signal(pthread_cond_t *cond);
+int pthread_cond_wait(pthread_cond_t *cond, pthread_mutex_t *mutex);
+int pthread_cond_broadcast(pthread_cond_t *cond);
+int pthread_cond_destroy(pthread_cond_t *cond);
+
 int pthread_mutex_destroy(pthread_mutex_t *mutex);
- int
- pthread_mutexattr_init(pthread_mutexattr_t *attr);
+int pthread_mutexattr_init(pthread_mutexattr_t *attr);
 
- int
- pthread_mutexattr_destroy(pthread_mutexattr_t *attr);
+int pthread_mutexattr_destroy(pthread_mutexattr_t *attr);
 
- int
- pthread_mutexattr_setprioceiling(pthread_mutexattr_t *attr, int prioceiling);
+int pthread_mutexattr_setprioceiling(pthread_mutexattr_t *attr, int prioceiling);
 
- int
- pthread_mutexattr_getprioceiling(pthread_mutexattr_t *attr, int *prioceiling);
+int pthread_mutexattr_getprioceiling(pthread_mutexattr_t *attr, int *prioceiling);
 
- int
- pthread_mutexattr_setprotocol(pthread_mutexattr_t *attr, int protocol);
+int pthread_mutexattr_setprotocol(pthread_mutexattr_t *attr, int protocol);
 
- int
- pthread_mutexattr_getprotocol(pthread_mutexattr_t *attr, int *protocol);
+int pthread_mutexattr_getprotocol(pthread_mutexattr_t *attr, int *protocol);
 
- int
- pthread_mutexattr_settype(pthread_mutexattr_t *attr, int type);
+int pthread_mutexattr_settype(pthread_mutexattr_t *attr, int type);
 
- int
- pthread_mutexattr_gettype(pthread_mutexattr_t *attr, int *type);
+int pthread_mutexattr_gettype(pthread_mutexattr_t *attr, int *type);
 
 int pthread_mutex_init(pthread_mutex_t *restrict mutex, const pthread_mutexattr_t *restrict attr);
-int pthread_mutexattr_getpshared(const pthread_mutexattr_t *
-       restrict attr, int *restrict pshared);
-int pthread_mutexattr_setpshared(pthread_mutexattr_t *attr,
-       int pshared);
-int get_pthread_process_shared(void);
+int pthread_mutexattr_getpshared(const pthread_mutexattr_t *restrict attr, int *restrict pshared);
+int pthread_mutexattr_setpshared(pthread_mutexattr_t *attr, int pshared);
 """
 )
 libraries = ["pthread"]
@@ -82,19 +102,13 @@ ffi.set_source(
 #include <pthread.h>
 #include <sys/mman.h>
 #include <fcntl.h>
+#include <time.h>
 
 typedef struct {
     char header[14];
     uint32_t size;
     uint32_t owner_pid;
 } shmmmap_header_t;
-
-int get_pthread_process_shared(void){
-    return PTHREAD_PROCESS_SHARED;
-};
-int get_pthread_recursive_type(void) {
-    return PTHREAD_MUTEX_RECURSIVE;
-};
     """,
     libraries=libraries,
 )

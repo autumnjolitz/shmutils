@@ -10,14 +10,14 @@ from .shm import (
     Flags as SHMFlags,
     shm_open as raw_shm_open,
     SharedMemoryHandle,
-    shm_unlink as raw_shm_unlink,
+    shm_unlink,
 )
 from . import mmap
 from .mmap import Protections as MapProtections, Flags as MapFlags
 
 
-def reattach_shared_memory(name, mode, size, mapping):
-    return PosixSharedMemory(name, "r+b", size, mapping=mapping)
+def reattach_shared_memory(cls, name, mode, size, mapping):
+    return cls(name, "r+b", size, mapping=mapping)
 
 
 class PosixSharedMemory(io.RawIOBase):
@@ -81,7 +81,7 @@ class PosixSharedMemory(io.RawIOBase):
         return self._handle
 
     def __reduce__(self):
-        return reattach_shared_memory, (self.name, self.mode, self.size, self._mmap)
+        return reattach_shared_memory, (type(self), self.name, self.mode, self.size, self._mmap)
 
     def relative_view(self, index: int, length: int = -1) -> RelativeView:
         if length == -1:
@@ -121,9 +121,10 @@ class PosixSharedMemory(io.RawIOBase):
                 pass
             else:
                 raise
-        if self._should_free and self._handle is not None:
-            shm_unlink(self._handle)
-        self._handle = None
+        if self._handle is not None:
+            if self._should_free:
+                shm_unlink(self._handle)
+            self._handle = None
 
     @classmethod
     def open(
@@ -140,11 +141,9 @@ class PosixSharedMemory(io.RawIOBase):
 shm_open = PosixSharedMemory.open
 
 
-def shm_unlink(page: Union[PosixSharedMemory, SharedMemoryHandle, str, bytes]):
-    if isinstance(page, PosixSharedMemory):
-        page.close()
-        return
-    raw_shm_unlink(page)
+@shm_unlink.register
+def _(page: PosixSharedMemory):
+    page.close()
 
 
 __all__ = [

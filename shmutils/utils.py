@@ -81,7 +81,13 @@ def _(value) -> str:
 
 
 def reattach_cffi(c_name, memory, index, endex):
-    return cffiwrapper(ffi.cast(c_name, memory.c_buf[index:endex]), memory)
+    ptr = ffi.cast(c_name, memory._raw.address + index)
+    if memory._used[index:endex]:
+        (i,) = memory._used[index:endex]
+        assert i.begin == index and i.end == endex
+        return cffiwrapper(ptr, memory)
+    else:
+        memory._register_allocation((index, endex), endex - index)
 
 
 class cffiwrapper:
@@ -102,8 +108,13 @@ class cffiwrapper:
         self.memory = memory
 
     def __reduce__(self):
-        _, (index, endex) = self.memory.ptrs[self.cdata]
-        return reattach_cffi, (ffi.typeof(self.cdata).cname, self.memory, index, endex)
+        start_offset = int(ffi.cast("void*", self.cdata) - self.memory._raw.address)
+        return reattach_cffi, (
+            ffi.typeof(self.cdata).cname,
+            self.memory,
+            start_offset,
+            start_offset + ffi.sizeof(self.cdata),
+        )
 
 
 class RelativeView:
