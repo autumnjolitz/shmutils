@@ -7,16 +7,6 @@ I've wondered why isn't it easier to have multiple processes be able to have a s
 
 I've also wondered about how to pass shared memory definitions between processes.
 
-
-.. |Release Status| image:: https://github.com/autumnjolitz/shmutils/actions/workflows/release.yml/badge.svg
-    :target: https://github.com/autumnjolitz/shmutils/actions/workflows/release.yml
-
-.. |Style Status| image:: https://github.com/autumnjolitz/shmutils/actions/workflows/style.yml/badge.svg
-    :target: https://github.com/autumnjolitz/shmutils/actions/workflows/style.yml
-
-.. |Test Status| image:: https://github.com/autumnjolitz/shmutils/actions/workflows/test.yml/badge.svg
-    :target: https://github.com/autumnjolitz/shmutils/actions/workflows/test.yml
-
 Examples
 -----------
 
@@ -70,7 +60,105 @@ Examples
             assert r1 + r2 == 2_0000
 
 
+Roadmap
+--------
 
+- |done| Virtual address stability
+
+  - ``MappedMemory.at`` (relative address to bytes)
+  - ``MappedMemory.absolute_at`` (absolute address to bytes)
+  - ``MappedMemory.abs_address_at`` (relative address -> absolute address)
+  - ``MappedMemory.relative_address_at`` (absolute address -> relative address)
+
+- |inprogress| Support Python ``multiprocessing.get_context("spawn")``
+- |todo| Refactor ``MappedMemory`` to ``AbsoluteMemory``, ``RelativeMemory`` where ``AbsoluteMemory`` is a subclass of ``RelativeMemory``
+
+  - disallow ``abs_address_at``, ``absolute_at`` on relative only mappings
+
+- |todo| figure out pickling of ``cffi.CData``
+-   |todo| switch to ``instruct`` for internal classes
+
+    - implement something like:
+
+      .. code-block:: python
+
+        from instruct import CBase, class_metadata, astuple
+        from shmutils import MemoryMap, MemoryFlags, ffi as shmffi
+
+        ...
+        fd = shm_open(...).truncate(PAGE_SIZE)
+        page = MemoryMap(None, PAGE_SIZE, flags=MemoryFlags.SHARED, fd=fd)
+        ...
+
+        ffi = cffi.FFI()
+        # You can include other ffi's to reuse c type declarations
+        ffi.include(shmffi)
+        ffi.cdef('''
+            typedef enum {INACTIVE, ACTIVE, DELETED} OrgUserStatus_t;
+        ''')
+        # pass into the instruct.CBase class an ffi instead of ``instruct.default_ffi``
+        class User(CBase, ffi=ffi):
+            __slots__ = '''
+            struct org_user_t {
+                uint64_t id;
+                char     *fullname;
+                uint8_t  fullname_len;
+                OrgUserStatus_t status;   
+            };
+            '''
+
+        assert User.__slots__ == ()
+        assert ffi.typeof(class_metadata(User, "cdecl")) is ffi.typeof('struct org_user_t)
+        assert ffi.sizeof('struct org_user_t') == class_metadata(User, "csizeof")
+        assert ffi is class_metadata(User, "default_ffi")
+
+        lib = ffi.dlopen(None)
+        # Allocate using ``ffi.new``
+        u = User.new(12345, b"Autumn", 6, lib.ACTIVE)
+        assert User.typeof(u) == 'struct org_user_t*'
+        assert ffi.typeof(u.id) is ffi.typeof('uint64_t')
+        assert ffi.typeof(u.fullname) is ffi.typeof('char*')
+        assert ffi.typeof(u.fullname_len) is ffi.typeof('uint8_t')
+        assert len(memoryview(User.getbuffer(u))) == User.sizeof()
+        assert len(memoryview(User.getbuffer(u))) == User.sizeof(u)
+        assert not hasattr(u, 'sizeof')
+        assert u.__internals__["heap"] is None
+
+        # Allocate using an alternate function
+        # in this case, use the ``.new`` malloc for the
+        # shared page
+        SharedUser: Type[User] = User.with_heap(page)
+        u2 = SharedUser.new()
+        assert u2.__internals__["heap"] is page
+        assert u2.id == 0
+        assert u2.fullname == ffi.NULL
+        assert u2.fullname_len == 0
+        assert u2.status == 0
+
+        # as far as the cdata is concerned, it points into the ``page``'s heap
+        # User the ``CBase``'s ``.addressof`` call to get a pointer to the entity
+        abs_ptr = ffi.cast('uintptr_t', User.addressof(u2))
+        assert page.address.begin <= int(abs_ptr) < page.address.end
+        # page contents and buffer match each other
+        assert page.absolute_at[abs_ptr: abs_ptr + User.sizeof()] == User.getbuffer()[0: User.sizeof()]
+
+        # demo assign
+        # allocate space for a name
+        raw_u2_fullname = page.new('char*', b'Autumn Jolitz')
+        u2.id = 4123
+        u2.fullname = u2_fullname  # assign the pointer
+        u2.fullname_len = 13
+        u2.status = lib.ACTIVE
+        assert astuple(u2) == (u2.id, raw_u2_fullname, u2.fullname_len, lib.ACTIVE)
+        u2_copy = pickle.loads(pickle.dumps(u2))
+        assert u2_copy.__internals__["heap"] is page
+        assert astuple(u2) == astuple(u2_copy)
+
+- |todo| split Locks into ``RawLock|RawRLock`` (consumes a ``memoryview|bytebuffer|ffi.buffer``, allocates from 0 to length of lock size)
+- |todo| split Locks into ``Lock|RLock``
+- |todo| reimplement locking in terms of a condition variable
+- |todo| use liblfs for a freelist
+- |todo| make a shared heap process-safe
 
 Limitations
 ------------------
@@ -147,11 +235,20 @@ However, it is observed that if a parent process manages to get a high enough me
                     assert future.done() and not future.exception()
                     assert (future.result(), value[0]) == (1923, 8900)
 
+.. |done| unicode:: U+2705
+.. |warning| unicode:: U+FE0F
+.. |error| unicode:: U+274C
+.. |inprogress| unicode:: U+1F6A7
+.. |todo| unicode:: U+2610
 
+.. |Release Status| image:: https://github.com/autumnjolitz/shmutils/actions/workflows/release.yml/badge.svg
+    :target: https://github.com/autumnjolitz/shmutils/actions/workflows/release.yml
 
+.. |Style Status| image:: https://github.com/autumnjolitz/shmutils/actions/workflows/style.yml/badge.svg
+    :target: https://github.com/autumnjolitz/shmutils/actions/workflows/style.yml
 
-
-
+.. |Test Status| image:: https://github.com/autumnjolitz/shmutils/actions/workflows/test.yml/badge.svg
+    :target: https://github.com/autumnjolitz/shmutils/actions/workflows/test.yml
 
 
 
