@@ -35,31 +35,21 @@ jobs:
         version_file: shmutils/about.py
         version_line_pattern: |
           __version__\s*=\s*(?:['"])([[:PEP440:]])(?:['"])
-    - name: Set up Python
-      uses: actions/setup-python@v3
-    - name: Install dependencies
-      with:
-        python-version: '3.7'
-      run: |
-        pip install -r test-requirements.txt
-    - name: "run black"
-      run: |
-          black --check --config .black.toml .
-    - name: Lint with flake8
-      run: |
-        # stop the build if there are Python syntax errors or undefined names
-        flake8 shmutils/ tests/ examples/ setup.py  --count --select=E9,F63,F7,F82 --show-source --statistics
 
   test:
+    runs-on: ${{ matrix.os }}
     if: needs.validate.outputs.version == 0
     needs: validate
-    runs-on: ${{ matrix.os }}
     strategy:
       matrix:
         python-version: ['3.7', '3.8', '3.9', '3.10']
         os: [ubuntu-latest, macos-latest]
     env:
       PIP_DISABLE_PIP_VERSION_CHECK: 1
+    steps:
+    - uses: actions/checkout@v3
+      name: Download source
+
     - name: Set up Python ${{ matrix.python-version }} on ${{ matrix.os }}
       uses: actions/setup-python@v3
       with:
@@ -67,9 +57,9 @@ jobs:
     - name: Install Python Dependencies
       run: |
         pip install -r requirements.txt -r test-requirements.txt
-        pip install pytest-cov .[test]
+        pip install .[test]
     - name: Test with pytest
-      run: python -m pytest . --doctest-modules --junitxml=junit/test-results-${{ matrix.python-version }}.xml --cov=com --cov-report=xml --cov-report=html
+      run: python -m pytest tests/ --doctest-modules --junitxml=junit/test-results-${{ matrix.python-version }}.xml
     - name: Upload pytest test results
       uses: actions/upload-artifact@v3
       with:

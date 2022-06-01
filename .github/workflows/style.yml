@@ -14,11 +14,13 @@ jobs:
 
     runs-on: ubuntu-latest
     steps:
+    - name: Download source
+      uses: actions/checkout@v3
     - name: Set up Python
       uses: actions/setup-python@v3
-    - name: Install dependencies
       with:
         python-version: '3.10'
+    - name: Install dependencies
       run: |
         pip install -r test-requirements.txt
     - name: "run black"
