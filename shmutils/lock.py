@@ -62,10 +62,10 @@ class RelativeLock(RelativeHandle):
         offset_mutex_attr_t = ffi.cast("void*", self.mutex_attr) - self._heap._raw.address
         offset_mutex_t = ffi.cast("void *", self.mutex_t) - self._heap._raw.address
 
-        assert self._heap[
+        assert self._heap.at[
             offset_mutex_t : offset_mutex_t + ffi.sizeof("pthread_mutex_t")
         ] == ffi.buffer(self.mutex_t)
-        assert self._heap[
+        assert self._heap.at[
             offset_mutex_attr_t : offset_mutex_attr_t + ffi.sizeof("pthread_mutexattr_t")
         ] == ffi.buffer(self.mutex_attr)
 
@@ -199,10 +199,10 @@ class Lock(RelativeLock):
         offset_mutex_attr_t = ffi.cast("void*", self.mutex_attr) - self._heap._raw.address
         offset_mutex_t = ffi.cast("void *", self.mutex_t) - self._heap._raw.address
 
-        assert self._heap[
+        assert self._heap.at[
             offset_mutex_t : offset_mutex_t + ffi.sizeof("pthread_mutex_t")
         ] == ffi.buffer(self.mutex_t)
-        assert self._heap[
+        assert self._heap.at[
             offset_mutex_attr_t : offset_mutex_attr_t + ffi.sizeof("pthread_mutexattr_t")
         ] == ffi.buffer(self.mutex_attr)
 
@@ -217,10 +217,10 @@ class RLock(RelativeLock):
         offset_mutex_attr_t = ffi.cast("void*", self.mutex_attr) - self._heap._raw.address
         offset_mutex_t = ffi.cast("void *", self.mutex_t) - self._heap._raw.address
 
-        assert self._heap[
+        assert self._heap.at[
             offset_mutex_t : offset_mutex_t + ffi.sizeof("pthread_mutex_t")
         ] == ffi.buffer(self.mutex_t)
-        assert self._heap[
+        assert self._heap.at[
             offset_mutex_attr_t : offset_mutex_attr_t + ffi.sizeof("pthread_mutexattr_t")
         ] == ffi.buffer(self.mutex_attr)
 

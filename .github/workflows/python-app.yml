@@ -10,8 +10,24 @@ on:
     branches: '*'
 
 jobs:
-  test-osx:
-    runs-on: macos-latest
+  black:
+    runs-on: ubuntu-latest
+    steps:
+    - uses: actions/checkout@v2
+    - name: Set up Python 3.7
+      uses: actions/setup-python@v2
+      with:
+        python-version: 3.7
+    - name: "install requirements"
+      run: |
+          python -m pip install -r test-requirements.lock
+    - name: "run black"
+      run: |
+          black --check --config .black.toml .
+
+  style:
+    needs: black
+    runs-on: ubuntu-latest
     steps:
     - uses: actions/checkout@v2
     - name: Set up Python 3.7
@@ -28,14 +44,31 @@ jobs:
       run: |
         # stop the build if there are Python syntax errors or undefined names
         flake8 shmutils/ tests/ examples/ setup.py  --count --select=E9,F63,F7,F82 --show-source --statistics
+
+  test-osx:
+    needs: style
+    runs-on: macos-latest
+    steps:
+    - uses: actions/checkout@v2
+    - name: Set up Python 3.7
+      uses: actions/setup-python@v2
+      with:
+        python-version: 3.7
+    - name: Install dependencies
+      run: |
+        python -m pip install --upgrade pip
+        if [ -f requirements.lock ]; then pip install -r requirements.lock; fi
+        if [ -f test-requirements.lock ]; then pip install -r test-requirements.lock; fi
+        pip install .[test]
     - name: Test with pytest
       run: |
         python -m pytest
-    - name: Check style
+    - name: Prepare wheels
       run: |
-        black --config .black.toml  .
+        python setup.py bdist_wheel
 
   test-linux:
+    needs: style
     runs-on: ubuntu-latest
 
     steps:
@@ -50,15 +83,11 @@ jobs:
         if [ -f requirements.lock ]; then pip install -r requirements.lock; fi
         if [ -f test-requirements.lock ]; then pip install -r test-requirements.lock; fi
         pip install .[test]
-    - name: Lint with flake8
-      run: |
-        # stop the build if there are Python syntax errors or undefined names
-        flake8 shmutils/ tests/ examples/ setup.py  --count --select=E9,F63,F7,F82 --show-source --statistics
     - name: Test with pytest
       run: |
         python -m pytest
-    - name: Check style
+    - name: Prepare wheels
       run: |
-        black --config .black.toml  .
+        python setup.py bdist_wheel
 
 

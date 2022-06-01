@@ -67,10 +67,10 @@ def test_mmap_spawn():
         # Allocate a dummy 512 MiB blockrange
         unused_space = MappedMemory(None, 512 * 1024 * 1024)
         # write to the pages to ensure we're not being fooled
-        unused_space[len(unused_space) - PAGESIZE : len(unused_space) - PAGESIZE + 4] = b"sink"
+        unused_space.at[len(unused_space) - PAGESIZE : len(unused_space) - PAGESIZE + 4] = b"sink"
 
         # Calculate the last page in the unused space range
-        start_address: int = unused_space.abs_address_at[len(unused_space) - PAGESIZE]
+        start_address: int = unused_space.address + len(unused_space) - PAGESIZE
         # detach the unused space guts so we can free all bu the last page
         raw_address, size = unused_space.detach()
         # free all BUT the last page

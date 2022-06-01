@@ -249,17 +249,6 @@ class Alloc:
 
 
 class MappedMemory(io.RawIOBase):
-    __slots__ = (
-        "_raw",
-        "_closed",
-        "_view",
-        "_index",
-        "_used",
-        "_freelist",
-        "_allocator",
-        "address",
-    )
-
     def __new__(
         cls,
         address,
@@ -452,15 +441,6 @@ class MappedMemory(io.RawIOBase):
     def tell(self) -> int:
         return self._index
 
-    def __getitem__(self, slice_or_index: Union[int, slice]):
-        """
-        Access at the relative offsets
-        """
-        return self._view.__getitem__(slice_or_index)
-
-    def __setitem__(self, slice_or_index: Union[int, slice], value):
-        return self._view.__setitem__(slice_or_index, value)
-
     @property
     def remainder(self) -> int:
         return len(self) - self._index
@@ -541,11 +521,11 @@ class MappedMemory(io.RawIOBase):
             if self.remainder < size:
                 logger.error("out of space")
                 return ffi.NULL
-            obj_start = self.tell()
-            next_obj_start = self.seek(obj_start + size)
-            self[obj_start:next_obj_start] = b"\x00" * size
-            self._used[obj_start:next_obj_start] = Alloc(obj_start, size, ptr_type)
-            return ffi.cast("void*", self._raw.address + obj_start)
+            rel_start: int = self.tell()  # relative address
+            next_rel_start = self.seek(rel_start + size)
+            self.at[rel_start:next_rel_start] = b"\x00" * size
+            self._used[rel_start:next_rel_start] = Alloc(rel_start, size, ptr_type)
+            return ffi.cast("void*", self._raw.address + rel_start)
         # Take out of circulation
         self._freelist.remove(candidate)
         candidate.ptr_type = ptr_type
@@ -568,7 +548,7 @@ class MappedMemory(io.RawIOBase):
         assert data.start == self.relative_address_at[ptr]
         assert data.size == size
 
-        self[offset : offset + size] = b"\x00" * size
+        self.at[offset : offset + size] = b"\x00" * size
         freed_interval = self._merge_intervals_near(
             Interval(offset, offset + size, None), self._freelist
         )
@@ -576,7 +556,7 @@ class MappedMemory(io.RawIOBase):
         if len(self._freelist) == 1:
             (i,) = self._freelist.items()
             if not self._used[i.end : len(self)]:
-                self[i.begin : i.end] = b"\x00" * (i.end - i.begin)
+                self.at[i.begin : i.end] = b"\x00" * (i.end - i.begin)
                 self.seek(i.begin)
                 self._freelist.remove(i)
 
