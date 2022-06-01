@@ -69,9 +69,89 @@ Examples
 Limitations
 ------------------
 
-- The "spawn" multiprocessing method is subject to ASLR and **sometimes** the kernel locates a child process starting much higher than our process. This has the effect of breaking the requirement for absolute pointers working. A possible method of handling this would be sending the child process the range to open and if the child cannot, the child sends the parent it's range - this means that a MappedMemory would have to be clear of allocs first.
-
-    + Use "fork" multiprocessing method instead.
-
 - Toy allocator, does not synchronize writes between processes (only parent is expected to have allocated ahead of time).
+
+spawn vs fork
+*******************
+
+
+Use "fork" multiprocessing method instead.
+
+The "spawn" multiprocessing method is subject to ASLR and **sometimes** the kernel locates a child process starting much higher than our process. This has the effect of breaking the requirement for absolute pointers working.
+
+However, it is observed that if a parent process manages to get a high enough memory page, the probability of the child process being able to ``mmap(2)`` the same address increases significantly.
+
+.. code-block:: python
+
+    import multiprocessing
+    from contextlib import suppress
+    from concurrent.futures import ProcessPoolExecutor, wait
+    from mmap import PAGESIZE
+
+    from shmutils import MappedMemory, MapFlags
+    from shmutils.mmap import munmap, round_to_page_size
+    from shmutils.shm import shm_open, ffi, shm_unlink
+    from shmutils.utils import cffiwrapper
+
+    # cffiwrapper - use to pickle/unpickle cffi objects between processes
+
+
+    def _set_data_to(value: cffiwrapper, to: int) -> int:
+        was = value[0]
+        for i in range(was, to):
+            value[0] = i
+        value[0] = to
+        return was
+
+
+    if __name__ == "__main__":
+        with suppress(FileNotFoundError):
+            shm_unlink("test-mmap-spawn")
+        with shm_open("test-mmap-spawn", "x+") as fd:
+            shared_size = round_to_page_size(1024 * 1024 * 1024)
+            fd.truncate(shared_size)
+            # Allocate a dummy 512 MiB blockrange
+            unused_space = MappedMemory(None, 512 * 1024 * 1024)
+            # write to the pages to ensure we're not being fooled
+            unused_space[len(unused_space) - PAGESIZE : len(unused_space) - PAGESIZE + 4] = b"sink"
+
+            # Calculate the last page in the unused space range
+            start_address: int = unused_space.abs_address_at[len(unused_space) - PAGESIZE]
+            # detach the unused space guts so we can free all bu the last page
+            raw_address, size = unused_space.detach()
+            # free all BUT the last page
+            munmap(raw_address, size - PAGESIZE)
+            del unused_space
+
+            # Prove our start address is the last page of the mostly freed range
+            # (our last page is still mapped.)
+            assert int(ffi.cast("uintptr_t", raw_address)) + size - PAGESIZE == start_address
+
+            with MappedMemory(
+                start_address, shared_size, flags=MapFlags.SHARED | MapFlags.FIXED, fd=fd
+            ) as m:
+                with ProcessPoolExecutor(1, mp_context=multiprocessing.get_context("spawn")) as exe:
+                    value = m.new("int64_t*", 1923)
+                    assert value[0] == 1923
+                    # The child process will now be able to mess with this counter
+                    future = exe.submit(_set_data_to, cffiwrapper(value, m), 8900)
+                    wait([future])
+                    # And we can see the results both on the value in memory and from the
+                    # return
+                    assert future.done() and not future.exception()
+                    assert (future.result(), value[0]) == (1923, 8900)
+
+
+
+
+
+
+
+
+
+
+
+
+
+
 

@@ -4,7 +4,7 @@ from contextlib import suppress
 from concurrent.futures import wait, ProcessPoolExecutor
 
 from shmutils import MappedMemory, MapFlags
-from shmutils.mmap import munmap
+from shmutils.mmap import munmap, round_to_page_size
 from mmap import PAGESIZE
 from shmutils.utils import cffiwrapper
 from _shmutils import ffi
@@ -13,6 +13,8 @@ from shmutils.shm import shm_open, shm_unlink
 
 def _set_data_to(value: cffiwrapper, to: int):
     was = value[0]
+    for i in range(was, to):
+        value[0] = i
     value[0] = to
     return was
 
@@ -58,25 +60,29 @@ def test_mmap_spawn():
         shm_unlink("test-mmap-spawn")
 
     with shm_open("test-mmap-spawn", "x+") as fd:
-        fd.truncate(PAGESIZE)
-        # Get a high page by writing into it on the last part
-        # of an absurd mmap request
-        sink = MappedMemory(None, 128 * 1024 * 1024, flags=MapFlags.PRIVATE | MapFlags.ANONYMOUS)
-        # write to the pages
-        sink[len(sink) - PAGESIZE : len(sink)] = b"sink" * (PAGESIZE // 4)
-        start_address = sink.address + len(sink) - PAGESIZE
+        shared_size = round_to_page_size(1024 * 1024 * 1024)
+        fd.truncate(shared_size)
+        # Allocate a dummy 512 MiB blockrange
+        unused_space = MappedMemory(None, 512 * 1024 * 1024)
+        # write to the pages to ensure we're not being fooled
+        unused_space[len(unused_space) - PAGESIZE : len(unused_space) - PAGESIZE + 4] = b"sink"
 
-        raw_address, size = sink.detach()
+        # Calculate the last page in the unused space range
+        start_address: int = unused_space.abs_address_at[len(unused_space) - PAGESIZE]
+        # detach the unused space guts so we can free all bu the last page
+        raw_address, size = unused_space.detach()
         # free all BUT the last page
         munmap(raw_address, size - PAGESIZE)
-        # unmap all but the last page
-        assert int(ffi.cast("uintptr_t", raw_address)) + (size - PAGESIZE) == start_address
-        del sink
+        del unused_space
+
+        # Prove our start address is the last page of the mostly freed range
+        # (our last page is still mapped.)
+        assert int(ffi.cast("uintptr_t", raw_address)) + size - PAGESIZE == start_address
 
         with MappedMemory(
-            start_address, PAGESIZE, flags=MapFlags.SHARED | MapFlags.FIXED, fd=fd
+            start_address, shared_size, flags=MapFlags.SHARED | MapFlags.FIXED, fd=fd
         ) as m:
-            with ProcessPoolExecutor(mp_context=multiprocessing.get_context("spawn")) as exe:
+            with ProcessPoolExecutor(1, mp_context=multiprocessing.get_context("spawn")) as exe:
                 value = m.new("int64_t*", 1923)
                 assert value[0] == 1923
                 future = exe.submit(_set_data_to, cffiwrapper(value, m), 8900)
