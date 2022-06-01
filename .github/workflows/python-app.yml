@@ -47,13 +47,18 @@ jobs:
 
   test-osx:
     needs: style
+    name: "[osx] Build/Test ${{ matrix.python-version }}"
     runs-on: macos-latest
+    strategy:
+      matrix:
+        python-version: [ '3.7', '3.8', '3.9', '3.10' ]
+
     steps:
     - uses: actions/checkout@v3
     - name: Set up Python 3.7
       uses: actions/setup-python@v3
       with:
-        python-version: 3.7
+        python-version: ${{ matrix.python-version }}
     - name: Install dependencies
       run: |
         python -m pip install --upgrade pip
@@ -69,7 +74,7 @@ jobs:
 
   test-linux:
     needs: style
-    name: Build/Test ${{ matrix.python-version }}
+    name: "[ubuntu] Build/Test ${{ matrix.python-version }}"
     runs-on: ubuntu-latest
     strategy:
       matrix:
