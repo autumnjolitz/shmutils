@@ -7,7 +7,7 @@ from shmutils.lock import Lock
 from shmutils.shm import shm_open, shm_unlink
 
 
-def _increment_to(m, lock: Lock, value: cffiwrapper, limit: int):
+def _increment_to(lock: Lock, value: cffiwrapper, limit: int):
     count = value[0]
     num_incr = 0
     while count < limit:
@@ -17,7 +17,7 @@ def _increment_to(m, lock: Lock, value: cffiwrapper, limit: int):
                 break
             num_incr += 1
             value[0] = count + 1
-    return num_incr
+    return num_incr, id(lock._heap)
 
 
 def test_simple_shared_lock():
@@ -33,10 +33,12 @@ def test_simple_shared_lock():
             lock = Lock(m)
             counter = m.new("size_t *", 0)
             with lock:
-                result1 = exe.submit(_increment_to, m, lock, cffiwrapper(counter, m), 2_0000)
-                result2 = exe.submit(_increment_to, m, lock, cffiwrapper(counter, m), 2_0000)
+                result1 = exe.submit(_increment_to, lock, cffiwrapper(counter, m), 2_0000)
+                result2 = exe.submit(_increment_to, lock, cffiwrapper(counter, m), 2_0000)
             tuple(as_completed((result1, result2)))
-            r1, r2 = result1.result(), result2.result()
+            (r1, mapping_id_from1), (r2, mapping_id_from2) = result1.result(), result2.result()
         assert (result1.exception(), result2.exception()) == (None, None)
-        assert counter[0] == 2_0000
-        assert r1 + r2 == 2_0000
+        assert (counter[0], r1 + r2) == (2_0000, 2_0000)
+        # prove that all processes accessed the same id through fork
+        # (we didn't modify anything in the heap)
+        assert mapping_id_from1 == mapping_id_from2 == id(m)

@@ -231,6 +231,23 @@ def raw_mmap(
 MMAP_FAILED = ffi.cast("void*", -1)
 
 
+class Alloc:
+    __slots__ = ("start", "size", "ptr_type")
+
+    def __init__(self, start, size, ptr_type: str = "void*"):
+        self.start = start
+        self.size = size
+        self.ptr_type = ptr_type
+
+    def keys(self):
+        return self.__slots__
+
+    def __iter__(self):
+        yield self.start
+        yield self.size
+        yield self.ptr_type
+
+
 class MappedMemory(io.RawIOBase):
     __slots__ = (
         "_raw",
@@ -294,18 +311,36 @@ class MappedMemory(io.RawIOBase):
         self._view = memoryview(self._raw.buffer)
         self._used = NonEvictingIntervalTree()
         self._freelist = NonEvictingIntervalTree()
-        self.new = ffi.new_allocator(alloc=self.malloc, free=self.free)
+        self._new = ffi.new_allocator(alloc=self.malloc, free=self.free)
 
         # maps an absolute pointer to a value in the heap
         self.absolute_at = AbsoluteView(self)
         # maps an relative pointer to a value in the heap
         self.at = RelativeView(self)
-        # maps a absolute address to a relative address
+
+        # maps a relative address to a absolute address
         self.abs_address_at = RelativeToAbsoluteAddress(self)
+
         # maps a relative addrress to one that can be ``ffi.cast('void*', ...)`` and have
         # it work.
         self.relative_address_at = AbsoluteToRelativeAddress(self)
         _all_mmaps[self._raw.as_absolute_offset()] = self
+
+    def new(self, cdecl, init=None):
+        ptr: void_ptr = self._new(cdecl, init)
+        index = self.relative_address_at[ptr]
+        (i,) = self._used.at(index)
+        i.data.ptr_type = cdecl
+        return ptr
+
+    def dumpheap(self) -> Dict[Tuple[int, int], str]:
+        """
+        print out the allocated ranges and c_types of the owners.
+        """
+        heap = {}
+        for used in self._used.items():
+            heap[(used.begin, used.end)] = used.data.ptr_type
+        return dict(sorted(heap.items(), key=lambda item: item[0][0]))
 
     def __reduce__(self):
         address = self.abs_address_at[0]
@@ -490,13 +525,13 @@ class MappedMemory(io.RawIOBase):
             # release this range to the freelist again
             self._freelist.add(
                 self._merge_intervals_near(
-                    Interval(span.begin + size, span.end, span.data), self._freelist
+                    Interval(span.begin + size, span.end, None), self._freelist
                 )
             )
-        self._used[span.begin : span.begin + size] = (span.begin, size)
+        self._used[span.begin : span.begin + size] = Alloc(span.begin, size, span.data.ptr_type)
         return span
 
-    def malloc(self, size: int) -> Union[void_ptr, Literal[ffi.NULL]]:
+    def malloc(self, size: int, ptr_type: str = "void*") -> Union[void_ptr, Literal[ffi.NULL]]:
         for candidate in self._freelist.items():
             if candidate.begin + size <= candidate.end:
                 break
@@ -509,10 +544,11 @@ class MappedMemory(io.RawIOBase):
             obj_start = self.tell()
             next_obj_start = self.seek(obj_start + size)
             self[obj_start:next_obj_start] = b"\x00" * size
-            self._used[obj_start:next_obj_start] = (obj_start, size)
+            self._used[obj_start:next_obj_start] = Alloc(obj_start, size, ptr_type)
             return ffi.cast("void*", self._raw.address + obj_start)
         # Take out of circulation
         self._freelist.remove(candidate)
+        candidate.ptr_type = ptr_type
         self._register_allocation(candidate, size)
         return ffi.cast("void*", self._raw.address + candidate.begin)
 
@@ -527,6 +563,10 @@ class MappedMemory(io.RawIOBase):
             return
         self._used.remove(interval)
         size = interval.end - interval.begin
+
+        data: Alloc = interval.data
+        assert data.start == self.relative_address_at[ptr]
+        assert data.size == size
 
         self[offset : offset + size] = b"\x00" * size
         freed_interval = self._merge_intervals_near(
