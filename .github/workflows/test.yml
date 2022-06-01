@@ -1,0 +1,86 @@
+# This workflow will install Python dependencies, run tests and lint with a single version of Python
+# For more information see: https://help.github.com/actions/language-and-framework-guides/using-python-with-github-actions
+
+name: Builds
+
+on:
+  push:
+    branches:
+      - main
+      # Use this to make a release out of phase with main
+      - "release/[0-9]+.[0-9x]+*"
+  pull_request:
+    branches:
+      - main
+
+jobs:
+  validate:
+    env:
+      PIP_DISABLE_PIP_VERSION_CHECK: 1
+
+    runs-on: ubuntu-latest
+    outputs:
+      version: ${{ needs.release.outputs.version }}
+    steps:
+    - uses: actions/checkout@v3
+      name: Download source
+
+    - name: Check if release PR.
+      uses: edgedb/action-release/validate-pr@master
+      id: release
+      with:
+        github_token: ${{ secrets.RELEASE_BOT_GITHUB_TOKEN }}
+        missing_version_ok: yes
+        version_file: shmutils/about.py
+        version_line_pattern: |
+          __version__\s*=\s*(?:['"])([[:PEP440:]])(?:['"])
+    - name: Set up Python
+      uses: actions/setup-python@v3
+    - name: Install dependencies
+      with:
+        python-version: '3.7'
+      run: |
+        pip install -r test-requirements.txt
+    - name: "run black"
+      run: |
+          black --check --config .black.toml .
+    - name: Lint with flake8
+      run: |
+        # stop the build if there are Python syntax errors or undefined names
+        flake8 shmutils/ tests/ examples/ setup.py  --count --select=E9,F63,F7,F82 --show-source --statistics
+
+  test:
+    if: needs.validate.outputs.version == 0
+    needs: validate
+    runs-on: ${{ matrix.os }}
+    strategy:
+      matrix:
+        python-version: ['3.7', '3.8', '3.9', '3.10']
+        os: [ubuntu-latest, macos-latest]
+    env:
+      PIP_DISABLE_PIP_VERSION_CHECK: 1
+    - name: Set up Python ${{ matrix.python-version }} on ${{ matrix.os }}
+      uses: actions/setup-python@v3
+      with:
+        python-version: ${{ matrix.python-version }}
+    - name: Install Python Dependencies
+      run: |
+        pip install -r requirements.txt -r test-requirements.txt
+        pip install pytest-cov .[test]
+    - name: Test with pytest
+      run: python -m pytest . --doctest-modules --junitxml=junit/test-results-${{ matrix.python-version }}.xml --cov=com --cov-report=xml --cov-report=html
+    - name: Upload pytest test results
+      uses: actions/upload-artifact@v3
+      with:
+        name: pytest-results-${{ matrix.python-version }}
+        path: junit/test-results-${{ matrix.python-version }}.xml
+      # Use always() to always run this step to publish test results when there are test failures
+      if: ${{ always() }}
+
+  regression-tests:
+    name: "Regression Tests"
+    needs: [test]
+    runs-on: ubuntu-latest
+
+    steps:
+      - run: echo OK
