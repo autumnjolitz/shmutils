@@ -5,17 +5,6 @@ from os import path
 from setuptools import setup, find_packages
 
 here = path.abspath(path.dirname(__file__))
-install_requirements = []
-with open("requirements.txt") as fh:
-    for line in fh:
-        line = line.strip()
-        install_requirements.append(line)
-
-test_requirements = []
-with open("test-requirements.txt") as fh:
-    for line in fh:
-        line = line.strip()
-        test_requirements.append(line)
 
 with open(path.join(here, "README.rst"), encoding="utf-8") as fh:
     long_description = fh.read()
@@ -37,11 +26,19 @@ setup(
     packages=find_packages(exclude=["contrib", "docs", "tests*"]),
     include_package_data=True,
     extras_require={
-        "test": test_requirements,
+        "test": [
+            "pytest",
+            "black",
+            "flake8",
+            "wheel",
+        ],
     },
     setup_requires=["cffi>=1.0.0"],
     cffi_modules=["shmutils/ffibuilder.py:ffi"],
-    install_requires=install_requirements,
+    install_requires=[
+        "cffi>=1.0.0",
+        "intervaltree",
+    ],
     keywords=["shm", "shared", "memory"],
     url="https://github.com/autumnjolitz/shmutils",
     classifiers=[
