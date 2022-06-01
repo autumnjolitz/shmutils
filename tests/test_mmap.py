@@ -1,5 +1,6 @@
 import pytest
 import multiprocessing
+import platform
 from contextlib import suppress
 from concurrent.futures import wait, ProcessPoolExecutor
 
@@ -48,6 +49,7 @@ def test_mmap_fork():
         shm_unlink("test-mmap-fork")
 
 
+@pytest.mark.skipif(platform.system() != "Darwin", reason="requires osx")
 def test_mmap_spawn():
     """
     ARJ: ASLR lives to make our lives hard.
