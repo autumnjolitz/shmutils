@@ -8,7 +8,8 @@ on:
     branches:
       - main
       # Use this to make a release out of phase with main
-      - "release/[0-9]+.[0-9x]+*"
+      - "release/[0-9]+"
+      - "release/[0-9]+.[0-9]+"
   pull_request:
     branches:
       - main

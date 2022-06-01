@@ -106,9 +106,6 @@ jobs:
 
     steps:
     - uses: actions/checkout@v3
-      with:
-        fetch-depth: 5
-        submodules: false
 
     - uses: actions/download-artifact@v2
       with:
