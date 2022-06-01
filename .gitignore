@@ -11,3 +11,4 @@ python/
 # Ignore OSX finder directories
 .DS_Store
 
+*.sublime-workspace
