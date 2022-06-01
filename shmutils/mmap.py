@@ -4,8 +4,8 @@ import errno
 import os
 import functools
 import logging
-import signal
-from typing import Union, NewType, Type, NamedTuple, Dict
+import weakref
+from typing import Union, NewType, Type, NamedTuple, Dict, Tuple
 from enum import IntFlag
 from mmap import PROT_EXEC, PROT_READ, PROT_WRITE, PAGESIZE, MAP_SHARED, MAP_PRIVATE, MAP_ANONYMOUS
 
@@ -21,19 +21,29 @@ from _shmutils import lib, ffi
 from intervaltree import IntervalTree, Interval
 from . import errors
 from .errors import libc_error
+from .typing import void_ptr, buffer_t
+from .utils import (
+    AbsoluteView,
+    RelativeView,
+    RelativeToAbsoluteAddress,
+    AbsoluteToRelativeAddress,
+    is_cffi,
+)
 
 from .shm import SharedMemoryHandle
 
 logger = logging.getLogger(__name__)
 Size = NewType("Size", int)
 
-is_forked = False
+has_forked: bool = False
+
+_all_mmaps = weakref.WeakValueDictionary()
 
 
 @ffi.def_extern()
 def mmap_fork_callback():
-    global is_forked
-    is_forked = True
+    global has_forked
+    has_forked = True
 
 
 code = lib.pthread_atfork(ffi.NULL, ffi.NULL, lib.mmap_fork_callback)
@@ -108,11 +118,6 @@ def round_to_page_size(size: Size) -> Size:
     return Size(pages * PAGESIZE)
 
 
-ssize_t = NewType("ssize_t", type(ffi.cast("ssize_t", -1)))
-void_ptr = NewType("void*", type(ffi.cast("void*", -1)))
-buffer_t = NewType("buffer_t", ffi.buffer)
-
-
 class _RawMMap(NamedTuple):
     buffer: buffer_t
 
@@ -136,7 +141,7 @@ class RawMMap(_RawMMap):
         offset: int = 0,
     ):
         address_type = None
-        if address is None:
+        if address is None or address == ffi.NULL:
             address = 0
         else:
             if not isinstance(address, int):
@@ -227,19 +232,35 @@ MMAP_FAILED = ffi.cast("void*", -1)
 
 
 class MappedMemory(io.RawIOBase):
-    __slots__ = ("_raw", "_closed", "_view", "_index", "_used", "_freelist", "_allocator")
+    __slots__ = (
+        "_raw",
+        "_closed",
+        "_view",
+        "_index",
+        "_used",
+        "_freelist",
+        "_allocator",
+        "address",
+    )
 
     def __new__(
         cls,
+        address,
         *args,
         **kwargs,
     ):
+        if address in (0, ffi.NULL, None):
+            address = 0
+        if not isinstance(address, int) and is_cffi(address):
+            address = int(ffi.cast("uintptr_t", address))
+        if address and address in _all_mmaps:
+            return _all_mmaps[address]
         has_flags = False
         try:
             flags = kwargs["flags"]
         except KeyError:
             try:
-                flags = args[3]
+                flags = args[2]
             except IndexError:
                 pass
             else:
@@ -253,7 +274,7 @@ class MappedMemory(io.RawIOBase):
                 cls = PrivateMemory
                 if flags & Flags.FIXED:
                     cls = FixedPrivateMemory
-        return super().__new__(cls, *args, **kwargs)
+        return super().__new__(cls, address, *args, **kwargs)
 
     def __init__(
         self,
@@ -269,13 +290,25 @@ class MappedMemory(io.RawIOBase):
         self._fd = fd
         self._index = 0
         self._raw = RawMMap(address, size, protection, flags, int(fd), offset)
+        self.address = self._raw.as_absolute_offset()
         self._view = memoryview(self._raw.buffer)
         self._used = NonEvictingIntervalTree()
         self._freelist = NonEvictingIntervalTree()
         self.new = ffi.new_allocator(alloc=self.malloc, free=self.free)
 
+        # maps an absolute pointer to a value in the heap
+        self.absolute_at = AbsoluteView(self)
+        # maps an relative pointer to a value in the heap
+        self.at = RelativeView(self)
+        # maps a absolute address to a relative address
+        self.abs_address_at = RelativeToAbsoluteAddress(self)
+        # maps a relative addrress to one that can be ``ffi.cast('void*', ...)`` and have
+        # it work.
+        self.relative_address_at = AbsoluteToRelativeAddress(self)
+        _all_mmaps[self._raw.as_absolute_offset()] = self
+
     def __reduce__(self):
-        address = self._raw.as_absolute_offset()
+        address = self.abs_address_at[0]
         size = len(self._raw)
         protection = self._raw.protection
         flags = self._raw.flags
@@ -293,9 +326,40 @@ class MappedMemory(io.RawIOBase):
             self._used,
         )
 
+    def detach(self) -> Tuple[void_ptr, Size]:
+        """
+        disconnect from this object the pointer, size
+        """
+        if self._closed:
+            raise io.UnsupportedOperation
+        raw = self._raw
+        self._raw = None
+        self.close()
+        return (raw.address, raw.size)
+
     def close(self):
         if self._closed:
             return
+        if self.address is not None:
+            self.address = None
+        if self._used is not None:
+            self._used.clear()
+            self._used = None
+        if self._freelist is not None:
+            self._freelist.clear()
+            self._freelist = None
+        if self.new is not None:
+            self.new = None
+        if self.absolute_at is not None:
+            self.absolute_at = None
+
+        if self.at is not None:
+            self.at = None
+        if self.abs_address_at is not None:
+            self.abs_address_at = None
+        if self.relative_address_at is not None:
+            self.relative_address_at = None
+
         if self._fd:
             self._fd = None
         if self._view is not None:
@@ -308,9 +372,7 @@ class MappedMemory(io.RawIOBase):
         self._closed = True
 
     def __len__(self) -> int:
-        if self._raw is not None:
-            return len(self._raw)
-        return -1
+        return len(self._raw)
 
     def get_cbuffer(self) -> buffer_t:
         if self._raw is not None:
@@ -356,6 +418,9 @@ class MappedMemory(io.RawIOBase):
         return self._index
 
     def __getitem__(self, slice_or_index: Union[int, slice]):
+        """
+        Access at the relative offsets
+        """
         return self._view.__getitem__(slice_or_index)
 
     def __setitem__(self, slice_or_index: Union[int, slice], value):
@@ -512,13 +577,15 @@ def unpickle_mmap(
     seek_to: int,
     freelist: NonEvictingIntervalTree,
     usedlist: NonEvictingIntervalTree,
-    pid: int,
 ) -> MappedMemory:
-    assert os.fstat(fd).st_size > 0
-    if is_forked:
-        m = MappedMemory(desired_address, size, protection, flags | Flags.FIXED, fd, offset)
+    assert fd == -1 or os.fstat(fd).st_size > 0
+    if has_forked:
+        # Fixed is mandatory in a forked process as we've already the range claimed
+        flags |= Flags.FIXED
     else:
-        m = MappedMemory(desired_address, size, protection, flags ^ Flags.FIXED, fd, offset)
+        # we want to explode if we're not already claimed
+        flags ^= Flags.FIXED
+    m = MappedMemory(desired_address, size, protection, flags, fd, offset)
     if m._raw.as_absolute_offset() != desired_address:
         direction = "lower"
         if m._raw.as_absolute_offset() > desired_address:
@@ -552,7 +619,7 @@ class SharedMemory(MappedMemory):
         """
         pickling a relative shared memory always becomes Absolute.
         """
-        address = self._raw.as_absolute_offset()
+        address = self.abs_address_at[0]
         size = len(self._raw)
         protection = self._raw.protection
         flags = self._raw.flags
@@ -568,7 +635,6 @@ class SharedMemory(MappedMemory):
             index,
             self._freelist,
             self._used,
-            os.getpid(),
         )
 
 

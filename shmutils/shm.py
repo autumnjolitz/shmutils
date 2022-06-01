@@ -89,26 +89,50 @@ class Flags(IntFlag):
         return mode
 
 
-class _SharedMemoryHandle(NamedTuple):
+class SharedMemoryHandle:
     fd: FileDescriptor
     name: bytes
     flags: Flags
+    closed: bool
+    _should_close: bool
 
-
-class SharedMemoryHandle(_SharedMemoryHandle):
-    def __new__(cls, fd, name, flags=Flags.NONE):
+    def __init__(self, fd, name, flags=Flags.NONE):
         if isinstance(name, str):
             name = name.encode()
-        return super().__new__(cls, fd, name, flags)
+        self.name = name
+        self.fd = fd
+        self.flags = flags
+        self.closed = False
+        self._should_close = False
+        try:
+            self.size()
+        except OSError as e:
+            if e.errno == errno.EBADF:
+                self.closed = True
+
+    def __enter__(self):
+        if self.closed:
+            raise ValueError
+        self._should_close = True
+        return self
+
+    def __exit__(self, exc_type, exc_value, traceback):
+        if self._should_close:
+            shm_unlink(self)
+            self._should_close = False
 
     def __reduce__(self):
         return shm_open, (self.name, "r+")
 
     def truncate(self, size):
+        if self.closed:
+            raise OSError(errno.EINVAL, "operation on closed file")
         os.ftruncate(int(self.fd), size)
         return self.size()
 
     def size(self) -> int:
+        if self.closed:
+            raise OSError(errno.EINVAL, "operation on closed file")
         return os.fstat(self.fd).st_size
 
     def stat(self) -> Optional[os.stat_result]:

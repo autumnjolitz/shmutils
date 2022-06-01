@@ -9,6 +9,7 @@ from typing import Union, Type, Any, Callable
 from _shmutils import ffi
 
 from .exceptions import DispatchError
+from .typing import void_ptr
 
 TYPE_NAME_OVERRIDES = {
     type(None): "null-equivalent type",
@@ -117,87 +118,68 @@ class cffiwrapper:
         )
 
 
-class RelativeView:
-    __slots__ = (
-        "_released",
-        "buffer",
-        "buffer_view",
-        "index",
-        "length",
-        "_relative_view",
-    )
-
+class RelativeToAbsoluteAddress:
     def __init__(
         self,
-        buffer: Union[memoryview, bytearray, RelativeView],
-        index: int,
-        length: int,
+        mapping,
     ):
-        assert index > -1
-        assert length > 0
-        self._released = False
-        self.buffer = buffer
-        if isinstance(buffer, RelativeView):
-            buffer = buffer._relative_view
-            assert isinstance(buffer, memoryview)
-        self.buffer_view = memoryview(buffer)
-        self.index = index
-        self._relative_view = self.buffer_view[index : index + length]
-        self.length = len(self._relative_view)
+        self.base_address = mapping._raw.as_absolute_offset()
+        self.size = len(mapping)
 
-    def relative_view(self, index, length):
-        return type(self)(self, index, length)
+    def __getitem__(self, relative_address: Union[void_ptr, int]):
+        if not isinstance(relative_address, int):
+            relative_address = ffi.cast("uintptr_t", relative_address)
+        relative_address = int(relative_address)
+        assert relative_address >= 0
+        if relative_address <= self.size:
+            return self.base_address + relative_address
+        raise IndexError(relative_address)
 
-    def __len__(self):
-        return self.length
 
-    def absolute_view(self) -> memoryview:
-        buffer = self.buffer
-        while isinstance(buffer, RelativeView):
-            buffer = buffer.buffer
-        return memoryview(buffer)
+class AbsoluteToRelativeAddress:
+    def __init__(self, mapping):
+        self.base_address = mapping._raw.as_absolute_offset()
+        self.size = len(mapping)
 
-    # ARJ: All sets/gets on it are done by relative
-    def __setitem__(
+    def __getitem__(self, absolute_address: Union[int, void_ptr]) -> int:
+        assert not isinstance(absolute_address, slice)
+        if not isinstance(absolute_address, int):
+            absolute_address = ffi.cast("uintptr_t", absolute_address)
+        absolute_address = int(absolute_address)
+        relative_address = absolute_address - self.base_address
+        assert -1 < relative_address < self.size
+        return relative_address
+
+
+class AbsoluteView:
+    def __init__(
         self,
-        slice_or_index: Union[slice, int],
-        value: Union[bytes, memoryview, bytearray, mmap.mmap],
+        mapping,
     ):
-        if isinstance(slice_or_index, slice):
-            start = slice_or_index.start or 0
-            end = slice_or_index.stop or (len(value) + start)
-            available_length = len(self._relative_view[start:])
-            write_length = end - start
-            print("write ", write_length, available_length)
-            if write_length > available_length:
-                raise IndexError(
-                    f"Attempted to write {write_length} but only {available_length} available"
-                )
-        return self._relative_view.__setitem__(slice_or_index, value)
+        self.base_address = mapping._raw.as_absolute_offset()
+        self.mapping = mapping
 
-    def __getitem__(self, slice_or_index: Union[slice, int]) -> Union[int, memoryview]:
-        return self._relative_view.__getitem__(slice_or_index)
+    def __getitem__(self, index_or_slice: Union[int, void_ptr, slice]) -> Union[memoryview, int]:
+        if isinstance(index_or_slice, slice):
+            indices = [index_or_slice.start, index_or_slice.stop, index_or_slice.step]
+            for index, absolute_address in enumerate(indices):
+                if not isinstance(absolute_address, int):
+                    absolute_address = ffi.cast("uintptr_t", absolute_address)
+                absolute_address = int(index_or_slice)
+                relative_address = absolute_address - self.base_address
+                indices[index] = relative_address
+            return self.mapping.__getitem__(slice(*indices))
+        else:
+            if not isinstance(index_or_slice, int):
+                absolute_address = ffi.cast("uintptr_t", index_or_slice)
+            absolute_address = int(index_or_slice)
+            relative_address = absolute_address - self.base_address
+        return self.mapping[relative_address]
 
-    def __enter__(self) -> RelativeView:
-        if self._released:
-            raise ValueError
-        return self
 
-    def __exit__(self, exc_type, exc_value, traceback):
-        self.release()
+class RelativeView:
+    def __init__(self, mapping):
+        self.mapping = mapping
 
-    def __del__(self):
-        if self._released is not None:
-            self.release()
-            self._released = None
-        self.index = None
-        self.length = None
-
-    def release(self, _skip_set=False):
-        if self._relative_view is not None:
-            self._relative_view.release()
-            self._relative_view = None
-        if self.buffer_view is not None:
-            self.buffer_view.release()
-            self.buffer_view = None
-        self.buffer = None
+    def __getitem__(self, index_or_slice):
+        return self.mapping.__getitem__(index_or_slice)
