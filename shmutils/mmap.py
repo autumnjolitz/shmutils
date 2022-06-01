@@ -592,13 +592,13 @@ def unpickle_mmap(
     size: int,
     protection,
     flags: Flags,
-    fd: int,
+    fd: Union[int, SharedMemoryHandle],
     offset: int,
     seek_to: int,
     freelist: NonEvictingIntervalTree,
     usedlist: NonEvictingIntervalTree,
 ) -> MappedMemory:
-    assert fd == -1 or os.fstat(fd).st_size > 0
+    assert fd == -1 or os.fstat(int(fd)).st_size > 0
     if has_forked:
         # Fixed is mandatory in a forked process as we've already the range claimed
         flags |= Flags.FIXED
