@@ -20,7 +20,7 @@ jobs:
       id: checkver
       with:
         require_approval: no
-        github_token: ${{ secrets.RELEASE_USER_GITHUB_TOKEN }}
+        github_token: ${{ secrets.GITHUB_TOKEN }}
         version_file: shmutils/about.py
         version_line_pattern: |
           __version__\s*=\s*(?:['"])([[:PEP440:]])(?:['"])
@@ -124,7 +124,7 @@ jobs:
     - name: Merge and tag the PR
       uses: edgedb/action-release/merge@master
       with:
-        github_token: ${{ secrets.RELEASE_USER_GITHUB_TOKEN }}
+        github_token: ${{ secrets.GITHUB_TOKEN }}
         ssh_key: ${{ secrets.RELEASE_USER_SSH_KEY }}
         # gpg_key: ${{ secrets.RELEASE_USER_GPG_KEY }}
         # gpg_key_id: "5C468778062D87BF!"
@@ -133,7 +133,7 @@ jobs:
     - name: Publish Github Release
       uses: elprans/gh-action-create-release@master
       env:
-        GITHUB_TOKEN: ${{ secrets.RELEASE_USER_GITHUB_TOKEN }}
+        GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
       with:
         tag_name: v${{ steps.relver.outputs.version }}
         release_name: v${{ steps.relver.outputs.version }}
