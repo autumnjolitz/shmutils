@@ -68,6 +68,12 @@ jobs:
       if: always() # always run even if the previous step fails
       with:
         report_paths: 'test-run/junit/test-results-*.xml'
+    - name: Build coverage file
+      run: |
+        pip install pytest-cov
+        pytest --cache-clear --cov=shmutils test/ > pytest-coverage.txt
+    - name: Comment coverage
+      uses: coroo/pytest-coverage-commentator@v1.0.2
 
   regression-tests:
     name: "Regression Tests"
