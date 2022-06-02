@@ -60,14 +60,14 @@ jobs:
         pip install .[test]
     - name: Test with pytest
       run: |
-        mkdir junit
-        python -m pytest -svvv tests/ --doctest-modules --junitxml=junit/test-results-${{ matrix.python-version }}.xml
+        mkdir -p test-run/junit
+        cd test-run && python -m pytest -svvv ../tests/ --doctest-modules --junitxml=junit/test-results-${{ matrix.python-version }}.xml
 
     - name: Publish Test Report
       uses: mikepenz/action-junit-report@v3
       if: always() # always run even if the previous step fails
       with:
-        report_paths: '*/junit/test-results-*.xml'
+        report_paths: 'test-run/junit/test-results-*.xml'
 
   regression-tests:
     name: "Regression Tests"
