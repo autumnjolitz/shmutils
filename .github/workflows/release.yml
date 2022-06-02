@@ -88,6 +88,6 @@ jobs:
     - uses: ncipollo/release-action@v1
       with:
         generateReleaseNotes: true        
-        artifacts: "dist/*"
+        artifacts: "dist/*.tar.gz"
         token: ${{ secrets.GITHUB_TOKEN }}
 

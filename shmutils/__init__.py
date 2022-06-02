@@ -1,5 +1,5 @@
 "Shared memory utils in python"
-__version__ = "0.0.1"
+__version__ = "0.0.2"
 
 from .posix import PosixSharedMemory, shm_open, shm_unlink
 from .mmap import MappedMemory, Flags as MapFlags, Protections as MapProtections
