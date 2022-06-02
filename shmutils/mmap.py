@@ -5,7 +5,6 @@ import os
 import functools
 import logging
 import weakref
-from contextlib import contextmanager
 import collections.abc
 from typing import Union, NewType, Type, NamedTuple, Dict, Tuple, Optional, Mapping, Any
 from enum import IntFlag
@@ -19,11 +18,11 @@ else:
     except ImportError:
         from typing_extensions import Literal
 
-from _shmutils import lib, ffi
+from ._shmutils import lib, ffi
 from intervaltree import IntervalTree, Interval
 from . import errors
 from .errors import libc_error
-from .typing import void_ptr, buffer_t, AddressRange
+from .typing import void_ptr, buffer_t, AddressRange, MAP_FAILED
 from .utils import (
     AbsoluteView,
     RelativeView,
@@ -625,12 +624,9 @@ def unpickle_mmap(
     return m
 
 
-MMAP_FAILED: void_ptr = ffi.cast("void*", -1)
-
-
 def mmap(
-    address: Optional[Union[int, Literal[ffi.NULL]]] = None,
-    size: int = PAGESIZE,
+    address: Optional[Union[int, void_ptr]] = None,
+    size: int = PAGESIZE * 32,
     protection: Union[Protections, int] = Protections.READ_WRITE,
     flags: Union[Flags, int] = Flags.NONE,
     fd: int = -1,
@@ -669,7 +665,7 @@ def mmap(
         fd,
         ffi.cast("off_t", offset),
     )
-    if ptr == MMAP_FAILED:
+    if ptr == MAP_FAILED:
         template = None
         if ffi.errno == errno.EINVAL:
             template = "flags ({flags!r}) includes bits that are not part of any valid flags value."

@@ -1,16 +1,14 @@
 from __future__ import annotations
 
 import functools
-import mmap
 import string
 from contextlib import suppress
-from collections.abc import ItemsView as AbstractItemsView
 from typing import Union, Type, Any, Callable
 
-from _shmutils import ffi
+from ._shmutils import ffi
 
 from .exceptions import DispatchError
-from .typing import void_ptr, AddressRange
+from .typing import void_ptr
 
 TYPE_NAME_OVERRIDES = {
     type(None): "null-equivalent type",
