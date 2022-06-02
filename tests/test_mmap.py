@@ -72,14 +72,16 @@ def test_mmap_spawn():
         # Calculate the last page in the unused space range
         start_address: int = unused_space.address + len(unused_space) - PAGESIZE
         # detach the unused space guts so we can free all bu the last page
-        raw_address, size = unused_space.detach()
+        raw_mmap = unused_space.detach()
         # free all BUT the last page
-        munmap(raw_address, size - PAGESIZE)
+        munmap(raw_mmap.address, raw_mmap.size - PAGESIZE)
         del unused_space
 
         # Prove our start address is the last page of the mostly freed range
         # (our last page is still mapped.)
-        assert int(ffi.cast("uintptr_t", raw_address)) + size - PAGESIZE == start_address
+        assert (
+            int(ffi.cast("uintptr_t", raw_mmap.address)) + raw_mmap.size - PAGESIZE == start_address
+        )
 
         with MappedMemory(
             start_address, shared_size, flags=MapFlags.SHARED | MapFlags.FIXED, fd=fd

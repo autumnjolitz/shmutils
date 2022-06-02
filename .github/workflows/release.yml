@@ -29,7 +29,6 @@ jobs:
     - name: Build source distribution
       run: |
         python setup.py sdist
-        python -c 'exec(open("shmutils/about.py").read());print(__version__)' > dist/VERSION
     - uses: actions/upload-artifact@v2
       with:
         name: dist
@@ -40,8 +39,7 @@ jobs:
     strategy:
       matrix:
         os: [ubuntu-latest, macos-latest]
-        cibw_python: ["cp37-*", "cp38-*", "cp39-*", "cp310-*"]
-        cibw_arch: ["x86_64"]
+        python-version: ["3.7", "3.8", "3.9", "3.10"]
     defaults:
       run:
         shell: bash
@@ -55,22 +53,19 @@ jobs:
       if: startsWith(matrix.os, 'macos')
       run: |
         brew install libffi
-    - uses: pypa/cibuildwheel@v2.6.0
-      env:
-        CIBW_BUILD_VERBOSITY: 1
-        CIBW_BUILD: ${{ matrix.cibw_python }}
-        CIBW_ARCHS: ${{ matrix.cibw_arch }}
-        # This is needed for now because cffi has no cp310 wheels
-        CIBW_BEFORE_ALL_LINUX: "yum -y install libffi-devel"
-        CIBW_BEFORE_TEST: "python -m pip install -r requirements.txt -r test-requirements.txt"
-        CIBW_TEST_EXTRAS: "test"
-        CIBW_TEST_COMMAND: "python -m pytest {project}/tests"
-        CIBW_TEST_COMMAND_WINDOWS: "python -m pytest {project}\\tests"
+    - name: Set up Python
+      uses: actions/setup-python@v3
+      with:
+        python-version: ${{ matrix.python-version }}
+    - name: Build binary distribution
+      run: |
+        python -m pip install -U wheel pip
+        python setup.py bdist_wheel
 
     - uses: actions/upload-artifact@v2
       with:
         name: dist
-        path: ./wheelhouse/*.whl
+        path: dist/*.whl
 
   publish:
     needs: [build-sdist, build-wheels]
@@ -78,7 +73,6 @@ jobs:
 
     steps:
     - uses: actions/checkout@v3
-
     - uses: actions/download-artifact@v2
       with:
         name: dist
@@ -87,20 +81,20 @@ jobs:
     - name: Extract Release Version
       id: relver
       run: |
+        ls -al dist/
         set -e
-        echo ::set-output name=version::$(cat dist/VERSION)
-        rm dist/VERSION
+        echo ::set-output name=version::$(python -c 'exec(open("shmutils/about.py").read());print(__version__)'])
 
-    - name: Publish Github Release
-      uses: elprans/gh-action-create-release@master
-      env:
-        GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-      with:
-        tag_name: v${{ steps.relver.outputs.version }}
-        release_name: v${{ steps.relver.outputs.version }}
-        target: ${{ github.event.pull_request.base.ref }}
-        body: ${{ github.event.pull_request.body }}
-        draft: false
+    # - name: Publish Github Release
+    #   uses: elprans/gh-action-create-release@master
+    #   env:
+    #     GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+    #   with:
+    #     tag_name: v${{ steps.relver.outputs.version }}
+    #     release_name: v${{ steps.relver.outputs.version }}
+    #     target: ${{ github.event.pull_request.base.ref }}
+    #     body: ${{ github.event.pull_request.body }}
+    #     draft: false
 
     - run: |
         ls -al dist/

@@ -10,7 +10,7 @@ from typing import Union, Type, Any, Callable
 from _shmutils import ffi
 
 from .exceptions import DispatchError
-from .typing import void_ptr
+from .typing import void_ptr, AddressRange
 
 TYPE_NAME_OVERRIDES = {
     type(None): "null-equivalent type",
@@ -141,15 +141,30 @@ class AbsoluteToRelativeAddress:
     def __init__(self, mapping):
         self.base_address = mapping._raw.as_absolute_offset()
         self.size = len(mapping)
+        self.high_address = self.base_address + self.size
 
-    def __getitem__(self, absolute_address: Union[int, void_ptr]) -> int:
-        assert not isinstance(absolute_address, slice)
+    def __getitem__(self, addr_or_slice: Union[int, void_ptr, slice]) -> Union[int, range]:
+        if isinstance(addr_or_slice, slice):
+            abs_start, abs_end = (addr_or_slice.start, addr_or_slice.stop)
+            if abs_start is None:
+                abs_start = self.base_address
+            if abs_end is None:
+                abs_end = self.high_address
+            if abs_start < self.base_address:
+                raise IndexError(f"{abs_start} is lower than lowest address {self.base_address}")
+            if abs_start > self.high_address:
+                raise IndexError(f"{abs_start} is higher than highest address {self.high_address}")
+            return range(abs_start - self.base_address, abs_end - self.base_address)
+
+        absolute_address = addr_or_slice
         if not isinstance(absolute_address, int):
             absolute_address = ffi.cast("uintptr_t", absolute_address)
         absolute_address = int(absolute_address)
-        relative_address = absolute_address - self.base_address
-        assert -1 < relative_address < self.size
-        return relative_address
+        if not (self.base_address <= absolute_address < self.high_address):
+            raise IndexError(
+                f"{absolute_address} must be in range [{self.base_address}, {self.high_address})"
+            )
+        return absolute_address - self.base_address
 
 
 class AbsoluteView:
@@ -162,39 +177,40 @@ class AbsoluteView:
 
     def __getitem__(self, index_or_slice: Union[int, void_ptr, slice]) -> Union[memoryview, int]:
         if isinstance(index_or_slice, slice):
-            indices = [index_or_slice.start, index_or_slice.stop, index_or_slice.step]
-            for index, absolute_address in enumerate(indices):
-                if absolute_address is None:
-                    continue
-                if not isinstance(absolute_address, int):
-                    absolute_address = ffi.cast("uintptr_t", absolute_address)
-                absolute_address = int(index_or_slice)
-                relative_address = absolute_address - self.base_address
-                indices[index] = relative_address
-            return self.mapping._view.__getitem__(slice(*indices))
+            start, stop = index_or_slice.start, index_or_slice.stop
+            if start is None:
+                start = self.base_address
+            length = len(self.mapping)
+            if stop is not None:
+                length = stop - start
+            if length > len(self.mapping):
+                raise IndexError
+            return self.mapping.getbuffer(start - self.base_address, length)
+
         if not isinstance(index_or_slice, int):
             absolute_address = ffi.cast("uintptr_t", index_or_slice)
         absolute_address = int(index_or_slice)
         relative_address = absolute_address - self.base_address
-        return self.mapping._view[relative_address]
+        return self.mapping._raw.buffer[relative_address]
 
     def __setitem__(self, index_or_slice, value) -> Union[memoryview, int]:
         if isinstance(index_or_slice, slice):
-            indices = [index_or_slice.start, index_or_slice.stop, index_or_slice.step]
-            for index, absolute_address in enumerate(indices):
-                if absolute_address is None:
-                    continue
-                if not isinstance(absolute_address, int):
-                    absolute_address = ffi.cast("uintptr_t", absolute_address)
-                absolute_address = int(index_or_slice)
-                relative_address = absolute_address - self.base_address
-                indices[index] = relative_address
-            return self.mapping._view.__setitem__(slice(*indices), value)
+            start, stop = index_or_slice.start, index_or_slice.stop
+            if start is None:
+                start = self.base_address
+            if stop is None:
+                stop = self.base_address + len(self)
+            length = stop - start
+            if length > len(self.mapping):
+                raise IndexError
+            with self.mapping.getbuffer(start - self.base_address, length) as buf:
+                buf[0:length] = value
+            return
         if not isinstance(index_or_slice, int):
             absolute_address = ffi.cast("uintptr_t", index_or_slice)
         absolute_address = int(index_or_slice)
         relative_address = absolute_address - self.base_address
-        return self.mapping._view.__setitem__(relative_address, value)
+        return self.mapping._raw.buffer.__setitem__(relative_address, value)
 
 
 class RelativeView:
@@ -202,7 +218,7 @@ class RelativeView:
         self.mapping = mapping
 
     def __getitem__(self, index_or_slice):
-        return self.mapping._view.__getitem__(index_or_slice)
+        return self.mapping._raw.buffer.__getitem__(index_or_slice)
 
     def __setitem__(self, index_or_slice, value):
-        return self.mapping._view.__setitem__(index_or_slice, value)
+        return self.mapping._raw.buffer.__setitem__(index_or_slice, value)

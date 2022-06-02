@@ -5,7 +5,9 @@ import os
 import functools
 import logging
 import weakref
-from typing import Union, NewType, Type, NamedTuple, Dict, Tuple
+from contextlib import contextmanager
+import collections.abc
+from typing import Union, NewType, Type, NamedTuple, Dict, Tuple, Optional, Mapping, Any
 from enum import IntFlag
 from mmap import PROT_EXEC, PROT_READ, PROT_WRITE, PAGESIZE, MAP_SHARED, MAP_PRIVATE, MAP_ANONYMOUS
 
@@ -21,7 +23,7 @@ from _shmutils import lib, ffi
 from intervaltree import IntervalTree, Interval
 from . import errors
 from .errors import libc_error
-from .typing import void_ptr, buffer_t
+from .typing import void_ptr, buffer_t, AddressRange
 from .utils import (
     AbsoluteView,
     RelativeView,
@@ -34,6 +36,7 @@ from .shm import SharedMemoryHandle
 
 logger = logging.getLogger(__name__)
 Size = NewType("Size", int)
+Address = NewType("Address", int)
 
 has_forked: bool = False
 
@@ -131,51 +134,6 @@ class _RawMMap(NamedTuple):
 
 
 class RawMMap(_RawMMap):
-    def __new__(
-        cls,
-        address: Union[int, void_ptr, None],
-        size: Size,
-        protection: Protections,
-        flags: Flags = Flags.NONE,
-        fd: int = -1,
-        offset: int = 0,
-    ):
-        address_type = None
-        if address is None or address == ffi.NULL:
-            address = 0
-        else:
-            if not isinstance(address, int):
-                address_type = ffi.typeof(address)
-
-        assert isinstance(size, int) and size > 0
-        assert address > -1
-        assert isinstance(protection, Protections)
-        assert isinstance(flags, Flags)
-        assert isinstance(fd, int) and fd >= -1
-        assert isinstance(offset, int) and offset > -1
-        assert address_type is None or (address_type.kind, address_type.item.kind) == (
-            "pointer",
-            "void",
-        )
-
-        if not (Flags.SHARED & flags == Flags.SHARED) and not (flags & Flags.PRIVATE):
-            flags |= Flags.PRIVATE
-
-        if fd == -1:
-            if flags & Flags.PRIVATE:
-                flags |= Flags.ANONYMOUS
-            elif flags & Flags.SHARED:
-                flags |= Flags.ANONYMOUS
-
-        size = round_to_page_size(size)
-
-        if offset > 0:
-            offset = round_to_page_size(offset)
-        ptr = raw_mmap(address, size, protection, flags, fd, offset)
-        unaligned = int(ffi.cast("uintptr_t", ptr)) % PAGESIZE
-        assert not unaligned, "unalighned page!"
-        return super().__new__(cls, ffi.buffer(ptr, size), ptr, size, protection, flags, fd, offset)
-
     def __reduce__(self):
         raise TypeError
 
@@ -190,45 +148,6 @@ class RawMMap(_RawMMap):
 
     def __len__(self) -> int:
         return self.size
-
-
-def raw_mmap(
-    address: int,
-    size: int,
-    protection: Protections,
-    flags: Flags,
-    fd: Union[SharedMemoryHandle, int],
-    offset: int,
-) -> void_ptr:
-    ptr = lib.mmap(
-        ffi.cast("void *", address),
-        ffi.cast("size_t", size),
-        int(protection),
-        int(flags),
-        int(fd),
-        ffi.cast("off_t", offset),
-    )
-    if ptr == MMAP_FAILED:
-        template = None
-        if ffi.errno == errno.EINVAL:
-            template = "flags ({flags!r}) includes bits that are not part of any valid flags value."
-            if flags & Flags.FIXED == Flags.FIXED:
-                template = errors.MMAP_NEW_EINVAL_FIXED
-        elif ffi.errno == errno.EACCES:
-            if protection & Protections.READ == Protections.READ:
-                template = errors.MMAP_NEW_EACCESS_READ_ASKED
-            elif Protections & Protections.WRITE == Protections.WRITE:
-                template = errors.MMAP_NEW_EACCESS_WRITE_SHARED_ASKED
-        elif ffi.errno == errno.ENOMEM:
-            if flags & Flags.FIXED == Flags.FIXED:
-                template = errors.MMAP_NEW_ENOMEM_MAP_FIXED
-            elif flags & Flags.ANONYMOUS:
-                template = errors.MMAP_NEW_ENOMEM_MAP_ANON
-        raise libc_error(errors=MMAP_NEW_ERRCODES, flags=flags).with_template(template)
-    return ptr
-
-
-MMAP_FAILED = ffi.cast("void*", -1)
 
 
 class Alloc:
@@ -248,74 +167,214 @@ class Alloc:
         yield self.ptr_type
 
 
-class MappedMemory(io.RawIOBase):
-    def __new__(
-        cls,
-        address,
-        *args,
-        **kwargs,
-    ):
-        if address in (0, ffi.NULL, None):
-            address = 0
-        if not isinstance(address, int) and is_cffi(address):
-            address = int(ffi.cast("uintptr_t", address))
-        if address and address in _all_mmaps:
-            return _all_mmaps[address]
-        has_flags = False
-        try:
-            flags = kwargs["flags"]
-        except KeyError:
-            try:
-                flags = args[2]
-            except IndexError:
-                pass
-            else:
-                has_flags = True
-        else:
-            has_flags = True
-        if has_flags:
-            if flags & Flags.SHARED:
-                cls = SharedMemory
-            elif flags & Flags.PRIVATE:
-                cls = PrivateMemory
-                if flags & Flags.FIXED:
-                    cls = FixedPrivateMemory
-        return super().__new__(cls, address, *args, **kwargs)
+PageRange = NewType("PageRange", range)
 
-    def __init__(
-        self,
-        address: Union[int, void_ptr, None],
-        size: Size,
-        protection: Protections = Protections.READ_WRITE,
-        flags: Flags = Flags.PRIVATE | Flags.ANONYMOUS,
-        fd: Union[int, SharedMemoryHandle] = -1,
-        offset: int = 0,
-    ):
-        assert isinstance(fd, (int, SharedMemoryHandle))
-        self._closed = False
-        self._fd = fd
-        self._index = 0
-        self._raw = RawMMap(address, size, protection, flags, int(fd), offset)
-        self.address = self._raw.as_absolute_offset()
-        self._view = memoryview(self._raw.buffer)
-        self._used = NonEvictingIntervalTree()
-        self._freelist = NonEvictingIntervalTree()
-        self._new = ffi.new_allocator(alloc=self.malloc, free=self.free)
 
-        # maps an absolute pointer to a value in the heap
-        self.absolute_at = AbsoluteView(self)
+class AddressToPageMapping:
+    def __init__(self, mapping):
+        self.mapping = mapping
+
+    def __len__(self):
+        return self.mapping.size
+
+    def __getitem__(self, address) -> Union[int, range]:
+        if isinstance(address, slice):
+            return range(
+                self[address.start or self.mapping.address],
+                self[address.end or self.mapping.address + self.mapping.size],
+                PAGESIZE,
+            )
+        index = self.mapping.relative_address_at[address] // PAGESIZE
+        return index
+
+
+class PageMapping(collections.abc.Mapping):
+    def __init__(self, mapping):
+        self.length = len(mapping) // PAGESIZE
+        self.mapping = mapping
+        self.by_address = AddressToPageMapping(mapping)
+
+    def __contains__(self, address):
+        return self.mapping.address <= address < self.mapping.address + self.mapping.size
+
+    def __len__(self) -> int:
+        return self.length
+
+    def __iter__(self):
+        for key in self.keys():
+            yield key, self[key]
+
+    def __getitem__(self, page_index: Union[int, slice]) -> Union[Address, AddressRange]:
+        """
+        Map a page index to an absolute address
+        or a page_start:end to a range(absolute_address + page_start, ...)
+        """
+        if isinstance(page_index, slice):
+            start_index, stop = page_index.start, page_index.stop
+            if start_index is None:
+                start_index = 0
+            if stop is None:
+                stop = self.length
+            return AddressRange(range(self[start_index], (self[stop] - 1) + PAGESIZE, PAGESIZE))
+        if 0 <= page_index < self.length:
+            return self.mapping.abs_address_at[PAGESIZE * page_index]
+        raise KeyError(page_index)
+
+    def keys(self) -> PageRange:
+        return PageRange(range(0, self.length))
+
+    def __repr__(self):
+        return f"PageMapping({self.length - 1})"
+
+
+class RelativeMemory:
+    at: Mapping[Union[int, slice], Union[int, bytes]]
+    relative_address_at: Mapping[Union[Address, ffi.CData, slice], Union[int, range]]
+    page: Mapping[Union[int, slice], Union[Address, AddressRange]]
+
+    def __init__(self, *args, **kwargs):
         # maps an relative pointer to a value in the heap
         self.at = RelativeView(self)
-
-        # maps a relative address to a absolute address
-        self.abs_address_at = RelativeToAbsoluteAddress(self)
-
         # maps a relative addrress to one that can be ``ffi.cast('void*', ...)`` and have
         # it work.
         self.relative_address_at = AbsoluteToRelativeAddress(self)
-        _all_mmaps[self._raw.as_absolute_offset()] = self
 
-    def new(self, cdecl, init=None):
+        # maps page index to address like `.pages[0]` -> absolute_address of page 0,
+        #   `.pages[0:4]`` -> range(pages[0], pages[3], PAGESIZE)
+        self.pages = PageMapping(self)
+        super().__init__(*args, **kwargs)
+
+    def close(self):
+        if not self.closed:
+            if self.page is not None:
+                self.page = None
+            if self.at is not None:
+                self.at = None
+            if self.relative_address_at is not None:
+                self.relative_address_at = None
+        super().close()
+
+
+class AbsoluteMemory:
+    absolute_at: Mapping[Union[int, ffi.CData], int]
+    abs_address_at: Mapping[Union[int, ffi.CData], int]
+
+    def __init__(self, *args, **kwargs):
+        # maps an absolute pointer to a value in the heap
+        self.absolute_at = AbsoluteView(self)
+        # maps a relative address to a absolute address
+        self.abs_address_at = RelativeToAbsoluteAddress(self)
+        super().__init__(*args, **kwargs)
+
+    def close(self):
+        if not self.closed:
+            if self.absolute_at is not None:
+                self.absolute_at = None
+            if self.abs_address_at is not None:
+                self.abs_address_at = None
+        super().close()
+
+
+class Heap:
+    def __init__(self, *args, **kwargs):
+        self._used = NonEvictingIntervalTree()
+        self._freelist = NonEvictingIntervalTree()
+        self._new = ffi.new_allocator(alloc=self.malloc, free=self.free)
+        super().__init__()
+
+    def _merge_intervals_near(self, span: Interval, tree: IntervalTree) -> Interval:
+        data = span.data
+        size = span.end - span.begin
+        assert not tree.at(span.begin)
+        assert not tree[span.begin : span.end]
+        while tree.at(span.begin + size):
+            (next_freed,) = tree.at(span.begin + size)
+            tree.remove(next_freed)
+            assert next_freed != span
+            span = Interval(span.begin, next_freed.end)
+        if span.begin > 0:
+            while tree.at(span.begin - 1):
+                (prev_freed,) = tree.at(span.begin - 1)
+                tree.remove(prev_freed)
+                span = Interval(prev_freed.begin, span.end)
+        assert not tree[span.begin : span.end]
+        return span._replace(data=data)
+
+    def _register_allocation(
+        self, span: Union[Interval, Tuple[int, int], Tuple[int, int, Any]], size: int
+    ) -> Interval:
+        """
+        mark a region as used in our feal for a size.
+        """
+        if not isinstance(span, Interval) and isinstance(span, tuple) and len(span) in (2, 3):
+            span = Interval(*span)
+        assert isinstance(span, Interval)
+        assert not self._used[span.begin : span.end], "double registration!"
+        unused_bytes_in_range = span.end - (span.begin + size)
+        assert unused_bytes_in_range > -1
+        if unused_bytes_in_range:
+            # release this range to the freelist again
+            self._freelist.add(
+                self._merge_intervals_near(
+                    Interval(span.begin + size, span.end, None), self._freelist
+                )
+            )
+        self._used[span.begin : span.begin + size] = Alloc(span.begin, size, span.data)
+        return span
+
+    def malloc(self, size: int, ptr_type: str = "void*") -> Union[void_ptr, Literal[ffi.NULL]]:
+        for candidate in self._freelist.items():
+            if candidate.begin + size <= candidate.end:
+                break
+        else:
+            # No freelist entries available. :(
+            # so let's just move our in used boundary forwards...
+            offset: int = self.tell()  # relative address
+            written_size = self.write(b"\x00" * size)
+            if written_size < size:
+                logger.error("out of space")
+                return ffi.NULL
+            assert self.tell() - offset == size
+            self._used[offset : offset + size] = Alloc(offset, size, ptr_type)
+            return ffi.cast("void*", self.abs_address_at[offset])
+        # Take out of circulation
+        self._freelist.remove(candidate)
+        used = self._register_allocation(candidate, size)
+        used.data.ptr_type = ptr_type
+        return ffi.cast("void*", self.abs_address_at[used.begin])
+
+    def free(self, ptr: void_ptr):
+        if self._raw is None:
+            return
+        offset = ptr - self._raw.address
+        try:
+            (interval,) = self._used.at(offset)
+        except ValueError:
+            logger.error(f"double free at address {ptr} ({offset:=})")
+            return
+        self._used.remove(interval)
+        size = interval.end - interval.begin
+
+        data: Alloc = interval.data
+        assert data.start == self.relative_address_at[ptr]
+        assert data.size == size
+
+        self.at[offset : offset + size] = b"\x00" * size
+        freed_interval = self._merge_intervals_near(
+            Interval(offset, offset + size, None), self._freelist
+        )
+        self._freelist.add(freed_interval)
+        if len(self._freelist) == 1:
+            (i,) = self._freelist.items()
+            if not self._used[i.end : len(self)]:
+                self.at[i.begin : i.end] = b"\x00" * (i.end - i.begin)
+                self.seek(i.begin)
+                self._freelist.remove(i)
+
+    def new(self, cdecl: str, init=None) -> ffi.CData:
+        """
+        See ``ffi.new(...)```
+        """
         ptr: void_ptr = self._new(cdecl, init)
         index = self.relative_address_at[ptr]
         (i,) = self._used.at(index)
@@ -331,14 +390,72 @@ class MappedMemory(io.RawIOBase):
             heap[(used.begin, used.end)] = used.data.ptr_type
         return dict(sorted(heap.items(), key=lambda item: item[0][0]))
 
+    def close(self):
+        if self.closed:
+            return
+        if self._used is not None:
+            self._used.clear()
+            self._used = None
+        if self._freelist is not None:
+            self._freelist.clear()
+            self._freelist = None
+        if self.new is not None:
+            self.new = None
+        super().close()
+
+
+class MemoryFile(io.RawIOBase):
+    def __new__(
+        cls,
+        address,
+        *args,
+        **kwargs,
+    ):
+        if address in (0, ffi.NULL, None):
+            address = 0
+        if not isinstance(address, int) and is_cffi(address):
+            address = int(ffi.cast("uintptr_t", address))
+        if address and address in _all_mmaps:
+            return _all_mmaps[address]
+        return super().__new__(cls, address, *args, **kwargs)
+
+    def __init__(
+        self,
+        address: Union[int, void_ptr, None],
+        size: Size,
+        protection: Protections = Protections.READ_WRITE,
+        flags: Flags = Flags.PRIVATE | Flags.ANONYMOUS,
+        fd: Union[int, SharedMemoryHandle] = -1,
+        offset: int = 0,
+    ):
+        self._fd = fd
+        self._index = 0
+        size = round_to_page_size(size)
+        self._ptr = ptr = mmap(address, size, protection, flags, fd, offset)
+        # record the address from a uintptr_t of the mmap (might be different from prior address)
+        self.address = address = int(ffi.cast("uintptr_t", ptr))
+        self._raw = RawMMap(ffi.buffer(ptr, size), ptr, size, protection, flags, int(fd), offset)
+
+        super().__init__(address, size, protection, flags, fd, offset)
+
+        _all_mmaps[address] = self
+
+    @property
+    def size(self):
+        return self._raw.size
+
+    def __len__(self) -> int:
+        return self._raw.size
+
     def __reduce__(self):
-        address = self.abs_address_at[0]
-        size = len(self._raw)
+        address = self.address
+        size = len(self)
         protection = self._raw.protection
         flags = self._raw.flags
         offset = self._raw.offset
         index = self.tell()
         return unpickle_mmap, (
+            type(self),
             address,
             size,
             protection,
@@ -350,67 +467,43 @@ class MappedMemory(io.RawIOBase):
             self._used,
         )
 
-    def detach(self) -> Tuple[void_ptr, Size]:
+    def detach(self) -> RawMMap:
         """
         disconnect from this object the pointer, size
         """
-        if self._closed:
-            raise io.UnsupportedOperation
+        if self.closed:
+            raise io.UnsupportedOperation("already detached the buffer!")
         raw = self._raw
         self._raw = None
         self.close()
-        return (raw.address, raw.size)
+        return raw
 
     def close(self):
-        if self._closed:
+        if self.closed:
             return
         if self.address is not None:
             self.address = None
-        if self._used is not None:
-            self._used.clear()
-            self._used = None
-        if self._freelist is not None:
-            self._freelist.clear()
-            self._freelist = None
-        if self.new is not None:
-            self.new = None
-        if self.absolute_at is not None:
-            self.absolute_at = None
-
-        if self.at is not None:
-            self.at = None
-        if self.abs_address_at is not None:
-            self.abs_address_at = None
-        if self.relative_address_at is not None:
-            self.relative_address_at = None
-
-        if self._fd:
+        if self._fd is not None:
             self._fd = None
-        if self._view is not None:
-            self._view.release()
-            self._view = None
+        if self._ptr is not None:
+            self._ptr = None
         if self._raw is not None:
             _, address, size, *_ = self._raw
             munmap(address, size)
             self._raw = None
-        self._closed = True
-
-    def __len__(self) -> int:
-        return len(self._raw)
-
-    def get_cbuffer(self) -> buffer_t:
-        if self._raw is not None:
-            return self._raw.buffer
-        raise OSError(errno.EBADF, "operation on closed mmap")
+        super().close()
 
     def getbuffer(self, start_index: int = 0, length: int = -1) -> memoryview:
+        if self.closed:
+            raise io.UnsupportedOperation
+        buf = memoryview(self._raw.buffer)
         if (start_index, length) == (0, -1):
-            return memoryview(self._view)
+            return buf
         if length == -1:
             length = len(self)
         if start_index + length > len(self):
             length = len(self) - start_index
-        return self._view[start_index : start_index + length]
+        return buf[start_index : start_index + length]
 
     def fileno(self) -> int:
         fd = int(self._fd)
@@ -441,24 +534,12 @@ class MappedMemory(io.RawIOBase):
     def tell(self) -> int:
         return self._index
 
-    @property
-    def remainder(self) -> int:
-        return len(self) - self._index
-
-    @property
-    def pages(self) -> int:
-        return len(self) // PAGESIZE
-
-    @property
-    def flags(self) -> Flags:
-        return self._raw.flags
-
     def readinto(self, buffer) -> int:
         index = self._index
         length = len(buffer)
         if length > self.remainder:
             length = self.remainder
-        buffer[0:length] = self._view[index : index + length]
+        buffer[0:length] = self._raw.buffer[index : index + length]
         self._index = index + length
         return length
 
@@ -467,98 +548,22 @@ class MappedMemory(io.RawIOBase):
         size = len(b)
         if index + size >= len(self):
             size = len(self) - index
-        self._view[index : index + size] = b[0:size]
+        self._raw.buffer[index : index + size] = b[0:size]
         self._index = index + size
         return size
 
     def truncate(self, size) -> int:
         raise io.UnsupportedOperation
 
-    def _merge_intervals_near(self, span: Interval, tree: IntervalTree) -> Interval:
-        data = span.data
-        size = span.end - span.begin
-        assert not tree.at(span.begin)
-        assert not tree[span.begin : span.end]
-        while tree.at(span.begin + size):
-            (next_freed,) = tree.at(span.begin + size)
-            tree.remove(next_freed)
-            assert next_freed != span
-            span = Interval(span.begin, next_freed.end)
-        if span.begin > 0:
-            while tree.at(span.begin - 1):
-                (prev_freed,) = tree.at(span.begin - 1)
-                tree.remove(prev_freed)
-                span = Interval(prev_freed.begin, span.end)
-        assert not tree[span.begin : span.end]
-        return span._replace(data=data)
 
-    def _register_allocation(self, span: Interval, size: int):
-        """
-        mark a region as used in our feal for a size.
-        """
-        if not isinstance(span, Interval) and isinstance(span, tuple):
-            span = Interval(*span)
-        assert not self._used[span.begin : span.end], "double registration!"
-        unused_bytes_in_range = span.end - (span.begin + size)
-        assert unused_bytes_in_range > -1
-        if unused_bytes_in_range:
-            # release this range to the freelist again
-            self._freelist.add(
-                self._merge_intervals_near(
-                    Interval(span.begin + size, span.end, None), self._freelist
-                )
-            )
-        self._used[span.begin : span.begin + size] = Alloc(span.begin, size, span.data.ptr_type)
-        return span
+class MappedMemory(MemoryFile, RelativeMemory, AbsoluteMemory, Heap):
+    @property
+    def remainder(self) -> int:
+        return len(self) - self._index
 
-    def malloc(self, size: int, ptr_type: str = "void*") -> Union[void_ptr, Literal[ffi.NULL]]:
-        for candidate in self._freelist.items():
-            if candidate.begin + size <= candidate.end:
-                break
-        else:
-            # No freelist entries available. :(
-            # so let's just move our in used boundary forwards...
-            if self.remainder < size:
-                logger.error("out of space")
-                return ffi.NULL
-            rel_start: int = self.tell()  # relative address
-            next_rel_start = self.seek(rel_start + size)
-            self.at[rel_start:next_rel_start] = b"\x00" * size
-            self._used[rel_start:next_rel_start] = Alloc(rel_start, size, ptr_type)
-            return ffi.cast("void*", self._raw.address + rel_start)
-        # Take out of circulation
-        self._freelist.remove(candidate)
-        candidate.ptr_type = ptr_type
-        self._register_allocation(candidate, size)
-        return ffi.cast("void*", self._raw.address + candidate.begin)
-
-    def free(self, ptr: void_ptr):
-        if self._raw is None:
-            return
-        offset = ptr - self._raw.address
-        try:
-            (interval,) = self._used.at(offset)
-        except ValueError:
-            logger.error(f"double free at address {ptr} ({offset:=})")
-            return
-        self._used.remove(interval)
-        size = interval.end - interval.begin
-
-        data: Alloc = interval.data
-        assert data.start == self.relative_address_at[ptr]
-        assert data.size == size
-
-        self.at[offset : offset + size] = b"\x00" * size
-        freed_interval = self._merge_intervals_near(
-            Interval(offset, offset + size, None), self._freelist
-        )
-        self._freelist.add(freed_interval)
-        if len(self._freelist) == 1:
-            (i,) = self._freelist.items()
-            if not self._used[i.end : len(self)]:
-                self.at[i.begin : i.end] = b"\x00" * (i.end - i.begin)
-                self.seek(i.begin)
-                self._freelist.remove(i)
+    @property
+    def flags(self) -> Flags:
+        return self._raw.flags
 
 
 MPROTECT_ERRS = {
@@ -588,6 +593,7 @@ def mprotect(map: MappedMemory, offset: int, size: int, protection: Protections 
 
 
 def unpickle_mmap(
+    cls,
     desired_address: int,
     size: int,
     protection,
@@ -605,7 +611,7 @@ def unpickle_mmap(
     else:
         # we want to explode if we're not already claimed
         flags ^= Flags.FIXED
-    m = MappedMemory(desired_address, size, protection, flags, fd, offset)
+    m = cls(desired_address, size, protection, flags, fd, offset)
     if m._raw.as_absolute_offset() != desired_address:
         direction = "lower"
         if m._raw.as_absolute_offset() > desired_address:
@@ -619,77 +625,68 @@ def unpickle_mmap(
     return m
 
 
-class SharedMemory(MappedMemory):
-    def __init__(
-        self,
-        address: Union[int, void_ptr, None],
-        size: Size,
-        protection: Protections = Protections.READ_WRITE,
-        flags: Flags = Flags.NONE,
-        fd: Union[int, SharedMemoryHandle] = -1,
-        offset: int = 0,
-    ):
-        if not flags:
-            flags = Flags.SHARED
-        if not (flags & Flags.SHARED):
-            raise ValueError(f"Unable to initialize {type(self).__name__} without SHARED flags")
-        super().__init__(address, size, protection, flags, fd, offset)
-
-    def __reduce__(self):
-        """
-        pickling a relative shared memory always becomes Absolute.
-        """
-        address = self.abs_address_at[0]
-        size = len(self._raw)
-        protection = self._raw.protection
-        flags = self._raw.flags
-        offset = self._raw.offset
-        index = self.tell()
-        return unpickle_mmap, (
-            address,
-            size,
-            protection,
-            flags | Flags.FIXED,
-            self._fd,
-            offset,
-            index,
-            self._freelist,
-            self._used,
-        )
+MMAP_FAILED: void_ptr = ffi.cast("void*", -1)
 
 
-class PrivateMemory(MappedMemory):
-    def __init__(
-        self,
-        address: Union[int, void_ptr, None],
-        size: Size,
-        protection: Protections = Protections.READ_WRITE,
-        flags: Flags = Flags.NONE,
-        fd: Union[int, SharedMemoryHandle] = -1,
-        offset: int = 0,
-    ):
-        if not flags:
-            flags = Flags.PRIVATE
-        if not (flags & Flags.PRIVATE):
-            raise ValueError(f"Unable to initialize {type(self).__name__} without PRIVATE flags")
-        super().__init__(address, size, protection, flags, fd, offset)
+def mmap(
+    address: Optional[Union[int, Literal[ffi.NULL]]] = None,
+    size: int = PAGESIZE,
+    protection: Union[Protections, int] = Protections.READ_WRITE,
+    flags: Union[Flags, int] = Flags.NONE,
+    fd: int = -1,
+    offset: int = 0,
+) -> void_ptr:
+    if isinstance(flags, int):
+        flags = Flags(flags)
+    if isinstance(protection, int):
+        protection = Protections(protection)
+    if not isinstance(fd, int):
+        fd = int(fd)
+    if address is None or address == ffi.NULL:
+        address = 0
+    if not (Flags.SHARED & flags == Flags.SHARED) and not (flags & Flags.PRIVATE):
+        flags |= Flags.PRIVATE
 
+    if fd == -1:
+        if flags & Flags.PRIVATE:
+            flags |= Flags.ANONYMOUS
+        elif flags & Flags.SHARED:
+            flags |= Flags.ANONYMOUS
+    assert offset >= 0
+    assert fd >= -1
+    assert size > 0
+    assert round_to_page_size(size) == size, "size is not a multiple of PAGE_SIZE"
+    assert isinstance(flags, Flags)
+    assert address >= 0
+    assert isinstance(protection, Protections)
+    assert isinstance(flags, Flags)
 
-class FixedPrivateMemory(PrivateMemory):
-    def __init__(
-        self,
-        address: Union[int, void_ptr, None],
-        size: Size,
-        protection: Protections = Protections.READ_WRITE,
-        flags: Flags = Flags.NONE,
-        fd: Union[int, SharedMemoryHandle] = -1,
-        offset: int = 0,
-    ):
-        if not flags:
-            flags = Flags.PRIVATE | Flags.FIXED
-        if not (flags & Flags.FIXED):
-            raise ValueError(f"Unable to initialize {type(self).__name__} without FIXED flags")
-        super().__init__(address, size, protection, flags, fd, offset)
+    ptr = lib.mmap(
+        ffi.cast("void *", address),
+        ffi.cast("size_t", size),
+        int(protection),
+        int(flags),
+        fd,
+        ffi.cast("off_t", offset),
+    )
+    if ptr == MMAP_FAILED:
+        template = None
+        if ffi.errno == errno.EINVAL:
+            template = "flags ({flags!r}) includes bits that are not part of any valid flags value."
+            if flags & Flags.FIXED == Flags.FIXED:
+                template = errors.MMAP_NEW_EINVAL_FIXED
+        elif ffi.errno == errno.EACCES:
+            if protection & Protections.READ == Protections.READ:
+                template = errors.MMAP_NEW_EACCESS_READ_ASKED
+            elif Protections & Protections.WRITE == Protections.WRITE:
+                template = errors.MMAP_NEW_EACCESS_WRITE_SHARED_ASKED
+        elif ffi.errno == errno.ENOMEM:
+            if flags & Flags.FIXED == Flags.FIXED:
+                template = errors.MMAP_NEW_ENOMEM_MAP_FIXED
+            elif flags & Flags.ANONYMOUS:
+                template = errors.MMAP_NEW_ENOMEM_MAP_ANON
+        raise libc_error(errors=MMAP_NEW_ERRCODES, flags=flags).with_template(template)
+    return ptr
 
 
 def munmap(address: void_ptr, size: int):

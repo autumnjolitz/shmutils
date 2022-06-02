@@ -60,6 +60,29 @@ Examples
             assert r1 + r2 == 2_0000
 
 
+A MappedMemory is helpful for straddling the relative/absolute address world.
+
+.. code-block: pycon
+
+    >>> from shmutils import MappedMemory
+    >>> m = MappedMemory(0, 51342411)
+    >>> m.pages.length
+    12535
+    >>> ptr1, *_, ptr2 = m.pages[44:124]
+    >>> len(m.absolute_at[ptr1:ptr1+10])
+    10
+    >>> len(m.absolute_at[ptr1:ptr2])
+    327680
+    >>> m.absolute_at[ptr1:ptr1+10] = b'x' * 10
+    >>> m.relative_address_at[ptr1]
+    180224
+    >>> m.seek(180224)
+    180224
+    >>> m.read(10)
+    b'xxxxxxxxxx'
+    >>>
+
+
 Roadmap
 --------
 
@@ -71,10 +94,6 @@ Roadmap
   - ``MappedMemory.relative_address_at`` (absolute address -> relative address)
 
 - |inprogress| Support Python ``multiprocessing.get_context("spawn")``
-- |todo| Refactor ``MappedMemory`` to ``AbsoluteMemory``, ``RelativeMemory`` where ``AbsoluteMemory`` is a subclass of ``RelativeMemory``
-
-  - disallow ``abs_address_at``, ``absolute_at`` on relative only mappings
-
 - |todo| figure out pickling of ``cffi.CData``
 -   |todo| switch to ``instruct`` for internal classes
 
