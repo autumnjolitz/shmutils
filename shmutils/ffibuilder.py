@@ -49,12 +49,6 @@ typedef struct { ...; } pthread_mutexattr_t;
 typedef struct { ...; } pthread_condattr_t;
 struct timespec { ...; };
 
-typedef struct {
-    char header[14];
-    uint32_t size;
-    uint32_t owner_pid;
-} shmmmap_header_t;
-
 int pthread_mutex_lock(pthread_mutex_t *mutex);
 int pthread_mutex_trylock(pthread_mutex_t *mutex);
 int pthread_mutex_unlock(pthread_mutex_t *mutex);
@@ -75,14 +69,6 @@ int pthread_mutexattr_init(pthread_mutexattr_t *attr);
 
 int pthread_mutexattr_destroy(pthread_mutexattr_t *attr);
 
-int pthread_mutexattr_setprioceiling(pthread_mutexattr_t *attr, int prioceiling);
-
-int pthread_mutexattr_getprioceiling(pthread_mutexattr_t *attr, int *prioceiling);
-
-int pthread_mutexattr_setprotocol(pthread_mutexattr_t *attr, int protocol);
-
-int pthread_mutexattr_getprotocol(pthread_mutexattr_t *attr, int *protocol);
-
 int pthread_mutexattr_settype(pthread_mutexattr_t *attr, int type);
 
 int pthread_mutexattr_gettype(pthread_mutexattr_t *attr, int *type);
@@ -97,18 +83,12 @@ if platform.system().lower() in ("linux",):
     libraries.append("rt")
 
 ffi.set_source(
-    "_shmutils",
+    "shmutils._shmutils",
     r"""
 #include <pthread.h>
 #include <sys/mman.h>
 #include <fcntl.h>
 #include <time.h>
-
-typedef struct {
-    char header[14];
-    uint32_t size;
-    uint32_t owner_pid;
-} shmmmap_header_t;
     """,
     libraries=libraries,
 )

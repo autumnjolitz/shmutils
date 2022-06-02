@@ -14,5 +14,6 @@
 # recusive-include shmutils/templates *.html
 
 include LICENSE
+include shmutils/VERSION
 
 

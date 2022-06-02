@@ -8,7 +8,7 @@ from shmutils import MappedMemory, MapFlags
 from shmutils.mmap import munmap, round_to_page_size
 from mmap import PAGESIZE
 from shmutils.utils import cffiwrapper
-from _shmutils import ffi
+from shmutils._shmutils import ffi
 from shmutils.shm import shm_open, shm_unlink
 
 

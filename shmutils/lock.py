@@ -4,7 +4,7 @@ from enum import Flag
 from .errors import libc_error
 from . import errors
 from .mmap import MappedMemory
-from _shmutils import lib, ffi
+from ._shmutils import lib, ffi
 
 
 class LockType(Flag):

@@ -7,7 +7,7 @@ import functools
 from typing import NewType, NamedTuple, Optional, Union, Type, Dict
 from enum import IntFlag
 
-from _shmutils import lib, ffi
+from ._shmutils import lib, ffi
 
 from . import errors
 

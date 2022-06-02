@@ -4,7 +4,7 @@ import errno
 import logging
 from collections import ChainMap
 from typing import Type, Union, Tuple, Optional, Dict, Any
-from _shmutils import ffi
+from ._shmutils import ffi
 
 logger = logging.getLogger(__name__)
 
