@@ -1,17 +1,7 @@
 "Shared memory utils in python"
 __version__ = "0.0.2"
 
-from .posix import PosixSharedMemory, shm_open, shm_unlink
-from .mmap import MappedMemory, Flags as MapFlags, Protections as MapProtections
-from .utils import RelativeView
+from .mmap import Flags as MapFlags, Protections as MapProtections, mmap
 
 
-__all__ = [
-    "PosixSharedMemory",
-    "shm_open",
-    "shm_unlink",
-    "MappedMemory",
-    "MapProtections",
-    "MapFlags",
-    "RelativeView",
-]
+__all__ = ["MapProtections", "MapFlags", "mmap"]

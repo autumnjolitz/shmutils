@@ -6,12 +6,7 @@ import io
 from typing import Union, Type, Optional
 
 from .utils import RelativeView
-from .shm import (
-    Flags as SHMFlags,
-    shm_open as raw_shm_open,
-    SharedMemoryHandle,
-    shm_unlink,
-)
+from .shm import Flags as SHMFlags, shm_open as raw_shm_open, SharedMemoryHandle, shm_unlink
 from . import mmap
 from .mmap import Protections as MapProtections, Flags as MapFlags
 
@@ -146,10 +141,4 @@ def _(page: PosixSharedMemory):
     page.close()
 
 
-__all__ = [
-    "SHMFlags",
-    "PosixSharedMemory",
-    "shm_unlink",
-    "shm_open",
-    "raw_shm_open",
-]
+__all__ = ["SHMFlags", "PosixSharedMemory", "shm_unlink", "shm_open", "raw_shm_open"]

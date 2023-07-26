@@ -222,9 +222,7 @@ def shm_unlink(name: Union[str, bytes]) -> None:
         errored = lib.shm_unlink(c_name)
     if not errored:
         return
-    raise errors.libc_error(
-        codes=SHM_ERRCODES,
-    )
+    raise errors.libc_error(codes=SHM_ERRCODES)
 
 
 @shm_unlink.register

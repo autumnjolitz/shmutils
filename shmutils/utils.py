@@ -1,14 +1,18 @@
 from __future__ import annotations
 
 import functools
+import asyncio
+import inspect
 import string
+import logging
+import weakref
 from contextlib import suppress
-from typing import Union, Type, Any, Callable
+from typing import Union, Type, Any, Callable, List, Awaitable
 
 from ._shmutils import ffi
 
 from .exceptions import DispatchError
-from .typing import void_ptr
+from .typing import void_ptr, T
 
 TYPE_NAME_OVERRIDES = {
     type(None): "null-equivalent type",
@@ -18,6 +22,8 @@ TYPE_NAME_OVERRIDES = {
 }
 
 TestFunc = Callable[[Any, Type[Any]], bool]
+
+logger = logging.getLogger(__name__)
 
 
 def conditional_dispatch(base_case_func):
@@ -220,3 +226,172 @@ class RelativeView:
 
     def __setitem__(self, index_or_slice, value):
         return self.mapping._raw.buffer.__setitem__(index_or_slice, value)
+
+
+pool = weakref.WeakKeyDictionary()
+
+
+class ListenerContext:
+    listeners: List[
+        Callable[
+            [
+                str,
+            ]
+        ]
+    ]
+
+    def __init__(self, event_name: str):
+        self.listeners = []
+        self.event_name = event_name
+
+    async def dispatch_event(self, value):
+        tasks = []
+        task_funcs = []
+        for listener_func in self.listeners:
+            try:
+                result = listener_func(self.event_name, value)
+            except BaseException:
+                logger.critical(f"{listener_func.__name__} threw an uncaught error!", exc_info=True)
+            else:
+                if inspect.isawaitable(result):
+                    if inspect.iscoroutine(result):
+                        result = loop.create_task(result)
+                    task_funcs.append(listener_func)
+                    tasks.append(result)
+        await asyncio.gather(*tasks, return_exceptions=True)
+        for listener_func, task in zip(task_funcs, tasks):
+            if task.exception() is not None:
+                if task.cancelled():
+                    continue
+                logger.critical(
+                    f"{listener_func.__name__} threw an uncaught error!", exc_info=task.exception()
+                )
+
+
+def add_event_listener(target, event_name, func, context=None):
+    if context is not None:
+        if context.event_name != event_name:
+            raise KeyError(event_name)
+        context.listeners.append(func)
+        return
+    if callable(target):
+        context = pool[target]
+
+
+def remove_event_listener(target, event_name, func, context=None):
+    if context is not None:
+        if context.event_name != event_name:
+            raise KeyError(event_name)
+        context.listeners.remove(func)
+        return
+
+
+def dispatch_event(func_or_event_name: str | Callable[..., T]):
+    event_name = None
+    if isinstance(func_or_event_name, str):
+        event_name = func_or_event_name
+
+    def wrapper(func: Callable[..., T]):
+        nonlocal event_name
+        assert callable(func)
+        assert inspect.iscoroutinefunction(func)
+        params = inspect.signature(func)
+        first, *rest = (params[key] for key in params)
+
+        bottom_func = get_bottom(func)
+        if event_name is None:
+            event_name = bottom_func.__name__
+            if bottom_func.__name__ == "<lambda>":
+                raise TypeError("wtf")
+        event_names = getattr(func, "event_names", ())
+        if event_name in event_names:
+            return func
+
+        default_context = ListenerContext(event_name)
+        self = None
+        if hasattr(func, "__self__"):
+            self = func.__self__
+            func = func.__func__
+        pool[(func, event_name)] = default_context
+
+        @functools.wraps(func)
+        def wrapped_simple(*args, **kwargs) -> Awaitable[T]:
+            context = None
+            if self is not None:
+                try:
+                    context = pool[(self, event_name)]
+                except KeyError:
+                    context = pool[(self, event_name)] = pool[(func, event_name)].copy()
+            if context is None:
+                context = pool[(func, event_name)]
+            value = func(*args, **kwargs)
+
+            async def _wrapped():
+                if inspect.isawaitable(value):
+                    value = await value
+                try:
+                    await context.dispatch_event(event_name, value)
+                except Exception as e:
+                    logger.exception(f"Unable to dispatch event {event_name!r}")
+                return value
+
+            return _wrapped()
+
+        wrapped = wrapped_simple
+
+        if first == "self":
+
+            @functools.wraps(func)
+            def wrapped_instance(self, *args, **kwargs) -> Awaitable[T]:
+                context = None
+                with suppress(TypeError):
+                    try:
+                        context = pool[(self, event_name)]
+                    except KeyError:
+                        context = pool[(self, event_name)] = pool[(func, event_name)].copy()
+                if context is None:
+                    context = pool[(func, event_name)]
+
+                value = func(self, *args, **kwargs)
+
+                async def _wrapped(value):
+                    if inspect.isawaitable(value):
+                        value = await value
+                    try:
+                        await context.dispatch_event(event_name, value)
+                    except Exception:
+                        logger.exception(f"Unable to dispatch event {event_name!r}")
+                    return value
+
+                return _wrapped(value)
+
+            wrapped = wrapped_instance
+
+        wrapped.add_event_listener = functools.partial(add_event_listener, context=default_context)
+        wrapped.remove_event_listener = functools.partial(
+            remove_event_listener, context=default_context
+        )
+        bottom_func.event_names = tuple(event_name, *event_names)
+
+        if self is not None:
+            return functools.partial(wrapped, self)
+
+        return wrapped
+
+    if callable(func_or_event_name):
+        return wrapper(func_or_event_name)
+    return wrapper
+
+
+def get_bottom(func):
+    for key in ("__wrapped__", "__func__"):
+        next_func = getattr(func, key, None)
+        if next_func is not None:
+            break
+    while next_func is not None:
+        func = next_func
+        for key in ("__wrapped__", "__func__"):
+            next_func = getattr(func, key, None)
+            if next_func is not None:
+                break
+    return func
